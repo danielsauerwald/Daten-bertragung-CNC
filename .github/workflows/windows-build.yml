@@ -1,0 +1,59 @@
+name: Windows-Programm bauen
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-linux:
+    name: Tests (Linux, virtuelle Schnittstelle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Abhängigkeiten (System-Python mit Tk)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb python3-tk python3-serial python3-pytest
+      - name: Tests (inkl. Oberfläche über virtuelles Kabel)
+        run: xvfb-run -a /usr/bin/python3 -m pytest -q
+
+  build-windows:
+    name: EXE bauen (Python 3.8, 32 Bit – läuft auch unter Windows 7)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+          architecture: x86
+      - name: Abhängigkeiten
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Tests
+        run: python -m pytest -q
+      - name: EXE bauen
+        run: >
+          python -m PyInstaller --noconfirm --clean --onefile --windowed
+          --name CNC-Datenuebertragung --icon assets\app.ico CNC-Datenuebertragung.pyw
+      - name: Selbsttest der EXE
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\CNC-Datenuebertragung.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Selbsttest fehlgeschlagen (Exit-Code $($p.ExitCode))" }
+          Get-Item dist\CNC-Datenuebertragung.exe | Format-List Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CNC-Datenuebertragung-Windows
+          path: dist/CNC-Datenuebertragung.exe
+      - name: Release anlegen (nur bei Versions-Tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CNC-Datenuebertragung.exe
