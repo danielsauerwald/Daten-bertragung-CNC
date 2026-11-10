@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.0
+# CNC-Datenübertragung 2.1
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -20,9 +20,20 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
   (Handshake), zeigt das Programm das an, statt scheinbar hängen zu bleiben.
 - **Empfang mit automatischem Ende**: beim zweiten `%` (Fanuc), bei `END PGM`
   (Heidenhain), bei M30 oder wenn einige Sekunden nichts mehr kommt.
-- **Speichern ohne Nachfrage**: Empfangene Programme werden im Ordner der Maschine
-  gespeichert und automatisch nach dem Programm benannt (z. B. `O1234_FLANSCH.nc`).
-  Vorhandene Dateien werden dabei nie überschrieben.
+- **Programmname wird automatisch erkannt.** Beim Empfang erscheint der Name sofort
+  oben im Editor und auf der Taste „Speichern“. Das Speichern-Fenster schlägt ihn vor.
+  Erkannt werden:
+  - Sinumerik-Werkstücke: `;$PATH=/_N_WKS_DIR/_N_METLOG_300069_WPD` wird zu **METLOG_300069**
+  - Sinumerik-Einzelprogramme: `%_N_WELLE_MPF` wird zu **WELLE**
+  - Fanuc: `O1234 (FLANSCH)` wird zu **O1234_FLANSCH**
+  - Heidenhain: `BEGIN PGM PLATTE` wird zu **PLATTE**
+- **Sprungliste für Unterprogramme**: Stehen mehrere Programme in einer Datei
+  (z. B. ABSTECH, KANAL1, KANAL2 … in einem Sinumerik-Werkstück), springt man über
+  „≡ 8 Programme ▾“ direkt dorthin.
+
+![Empfangenes Sinumerik-Werkstück mit erkanntem Namen](docs/empfangen.png)
+
+![Speichern mit vorgeschlagenem Namen](docs/speichern.png)
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
 - **LEDs für die Steuerleitungen** CTS, DSR, CD und RI sowie TX/RX, wie im alten Programm.
 - **Warnung vor Sonderzeichen** (ä, ö, ü, Ø …), die viele Steuerungen mit Alarm ablehnen.
@@ -89,8 +100,28 @@ wartet, bis die Steuerung bereit ist.
 2. An der Steuerung die Ausgabe starten (z. B. Fanuc: EDIT → PUNCH → EXEC).
 3. Der Text läuft live in den Editor. Das Ende wird automatisch erkannt. Mit
    **Empfang beenden** lässt sich der Empfang auch von Hand abschließen.
-4. **Speichern** antippen. Die Datei landet ohne Nachfrage im Ordner der Maschine.
+4. **Speichern** antippen. Es öffnet sich ein Fenster mit dem erkannten Namen
+   (z. B. `METLOG_300069`). Dort kann man ihn übernehmen oder ändern und die Endung
+   wählen (`.txt`, `.nc`, `.mpf` …). Die gewählte Endung merkt sich das Programm je Maschine.
+   Gibt es die Datei schon, warnt das Fenster. „+ Datum anhängen“ macht daraus z. B.
+   `METLOG_300069_2026-11-10`.
    Unter Maschine → Empfangen kann man stattdessen „automatisch speichern“ einschalten.
+   Dann wird ohne Fenster gespeichert, und vorhandene Dateien werden nie überschrieben.
+
+Ist eine Datei schon gespeichert, überschreibt **Speichern** sie direkt.
+**Speichern unter …** öffnet das Fenster, um einen anderen Namen oder Ordner zu wählen.
+
+### Sinumerik-Werkstücke mit mehreren Programmen
+
+Ein Werkstück wie `METLOG_300069` enthält mehrere Programme hintereinander, jedes mit
+eigenem Kopf `%_N_…_MPF`. Darauf ist das Programm eingestellt:
+
+- Ein `%_N_…`-Kopf beendet den Empfang nicht. Als Programmende zählt nur ein `%`,
+  das allein in der Zeile steht (Fanuc).
+- Beim Senden wird so ein Werkstück nicht zusätzlich mit `%` eingerahmt.
+- Klammern wie `GETD(Z12)` werden nicht als Kommentar eingefärbt.
+- Für Sinumerik-Maschinen empfiehlt sich als Programmende „Nur nach Zeit ohne Daten“.
+  M30 und M17 kommen in einem Werkstück mehrfach vor und taugen deshalb nicht als Ende.
 
 ## Warum sind die Zeilen früher verrutscht?
 
@@ -118,7 +149,7 @@ Zeilenende.
 | | % einrahmen | Ergänzt fehlende `%` am Anfang und Ende (Fanuc) |
 | | Vorlauf/Nachlauf | Anzahl NUL-Zeichen vor/nach dem Programm, für ältere Steuerungen |
 | | Pause je Zeichen/Zeile | Nur bei Maschinen ohne Handshake nötig |
-| Empfangen | Programmende erkennen | Zweites `%`, `END PGM`, M30/M02/M17 oder nur nach Zeit |
+| Empfangen | Programmende erkennen | Zweites alleinstehendes `%`, `END PGM`, M30/M02 oder nur nach Zeit |
 | | Beenden nach … s ohne Daten | Zählt erst ab dem ersten empfangenen Zeichen |
 | | Steuerzeichen entfernen | Filtert NUL-Vorlauf, XON/XOFF usw. heraus |
 | | Automatisch speichern | Speichert jedes empfangene Programm sofort |

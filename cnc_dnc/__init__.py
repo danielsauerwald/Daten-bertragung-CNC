@@ -1,4 +1,4 @@
 """CNC-Datenübertragung – Programme per RS-232 an CNC-Maschinen senden und empfangen."""
 
 APP_NAME = "CNC-Datenübertragung"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"

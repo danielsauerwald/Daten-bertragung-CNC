@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime
 import os
+import re
 import tkinter as tk
 from tkinter import filedialog, ttk
 from typing import Callable, Dict, Optional, Sequence, Tuple
@@ -17,6 +19,7 @@ from .config import (
     MachineProfile,
 )
 from .serial_link import list_ports
+from .system import IS_WIN, open_touch_keyboard
 from .textutil import END_MODES
 from .theme import C, Fonts, px
 
@@ -540,3 +543,143 @@ class _FormError(Exception):
 
 def _fmt_num(x: float) -> str:
     return str(int(x)) if float(x).is_integer() else str(x)
+
+
+# --------------------------------------------------------------------------
+# Speichern mit vorgeschlagenem Namen
+# --------------------------------------------------------------------------
+
+_BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+class SaveDialog(Dialog):
+    """Fragt den Dateinamen ab – vorbelegt mit dem im Programm erkannten Namen.
+
+    Liefert den vollständigen Pfad oder None.
+    """
+
+    def __init__(self, parent, fonts: Fonts, name: str, ext: str, folder: str, detected: str = "",
+                 title: str = "Programm speichern") -> None:
+        super().__init__(parent, fonts, title)
+        self.resizable(False, False)
+        self.folder = folder
+        self.name_var = tk.StringVar(value=name)
+        self.ext_var = tk.StringVar(value=ext)
+        bg = C["surface"]
+        pad = px(self, 24)
+
+        body = tk.Frame(self, bg=bg, padx=pad, pady=px(self, 20))
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(0, weight=1)
+        tk.Label(body, text=title, bg=bg, fg=C["text"], font=fonts.title, anchor="w").grid(
+            row=0, column=0, sticky="w")
+        if detected:
+            tk.Label(body, text="✓  Im Programm erkannt:  " + detected, bg=bg, fg=C["ok"], font=fonts.ui,
+                     anchor="w").grid(row=1, column=0, sticky="w", pady=(px(self, 4), 0))
+
+        tk.Label(body, text="Dateiname", bg=bg, fg=C["text"], font=fonts.ui_bold, anchor="w").grid(
+            row=2, column=0, sticky="w", pady=(px(self, 16), 0))
+        row = tk.Frame(body, bg=bg)
+        row.grid(row=3, column=0, sticky="ew", pady=(px(self, 6), px(self, 4)))
+        self.entry = ttk.Entry(row, textvariable=self.name_var, font=fonts.title, width=28)
+        self.entry.pack(side="left", fill="x", expand=True)
+        exts = list(FILE_EXTS)
+        if ext and ext not in exts:
+            exts.insert(0, ext)
+        ttk.Combobox(row, textvariable=self.ext_var, values=exts, width=6, font=fonts.title).pack(
+            side="left", padx=(px(self, 8), 0))
+        if IS_WIN:
+            ttk.Button(row, text="⌨", style="Small.TButton", width=3, command=open_touch_keyboard).pack(
+                side="left", padx=(px(self, 8), 0))
+        self.hint = tk.Label(body, text="", bg=bg, fg=C["muted"], font=fonts.small, anchor="w", justify="left",
+                             wraplength=px(self, 600))
+        self.hint.grid(row=4, column=0, sticky="w")
+
+        tk.Label(body, text="Ordner", bg=bg, fg=C["text"], font=fonts.ui_bold, anchor="w").grid(
+            row=5, column=0, sticky="w", pady=(px(self, 16), 0))
+        frow = tk.Frame(body, bg=bg)
+        frow.grid(row=6, column=0, sticky="ew", pady=(px(self, 6), 0))
+        self.folder_label = tk.Label(frow, text=folder, bg=bg, fg=C["muted"], font=fonts.ui, anchor="w",
+                                     justify="left", wraplength=px(self, 500))
+        self.folder_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(frow, text="Ändern …", style="Small.TButton", command=self._change_folder).pack(
+            side="right", padx=(px(self, 12), 0))
+
+        bar = tk.Frame(self, bg=C["bg"])
+        bar.pack(fill="x")
+        self.save_btn = ttk.Button(bar, text="Speichern", style="Primary.TButton", command=self.save)
+        self.save_btn.pack(side="right", padx=(0, px(self, 12)), pady=px(self, 14))
+        ttk.Button(bar, text="Abbrechen", command=self.cancel).pack(side="right", padx=(0, px(self, 12)))
+        ttk.Button(bar, text="+ Datum anhängen", command=self._add_date).pack(side="left", padx=px(self, 12))
+
+        self.name_var.trace_add("write", lambda *a: self._validate())
+        self.ext_var.trace_add("write", lambda *a: self._validate())
+        self.bind("<Return>", lambda e: self.save())
+        self._validate()
+        self.entry.focus_set()
+        self.entry.select_range(0, "end")
+        self.entry.icursor("end")
+
+    def _ext(self) -> str:
+        ext = self.ext_var.get().strip()
+        if ext and not ext.startswith("."):
+            ext = "." + ext
+        return ext
+
+    def _base(self) -> str:
+        name = self.name_var.get().strip()
+        ext = self._ext()
+        if ext and name.lower().endswith(ext.lower()):
+            name = name[: -len(ext)]
+        return name
+
+    def path(self) -> str:
+        return os.path.join(self.folder, self._base() + self._ext())
+
+    def _validate(self) -> bool:
+        base = self._base()
+        if not base:
+            self._set_hint("Bitte einen Dateinamen eingeben.", C["error"], ok=False)
+            return False
+        if _BAD_CHARS.search(base + self._ext()):
+            self._set_hint('Diese Zeichen sind in Dateinamen nicht erlaubt:  \\ / : * ? " < > |', C["error"],
+                           ok=False)
+            return False
+        path = self.path()
+        if os.path.exists(path):
+            when = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%d.%m.%Y %H:%M")
+            self._set_hint("„{}“ gibt es schon (gespeichert am {}). Speichern überschreibt diese Datei – "
+                           "oder „+ Datum anhängen“ antippen.".format(os.path.basename(path), when),
+                           C["warn"], ok=True, overwrite=True)
+        else:
+            self._set_hint("Wird gespeichert als:  " + os.path.basename(path), C["muted"], ok=True)
+        return True
+
+    def _set_hint(self, text: str, color: str, ok: bool, overwrite: bool = False) -> None:
+        self.hint.configure(text=text, fg=color)
+        self.save_btn.configure(text="Überschreiben" if overwrite else "Speichern",
+                                style="Danger.TButton" if overwrite else "Primary.TButton")
+        self.save_btn.state(["!disabled"] if ok else ["disabled"])
+
+    def _add_date(self) -> None:
+        base = re.sub(r"_\d{4}-\d{2}-\d{2}(_\d{4,6})?$", "", self._base())
+        now = datetime.datetime.now()
+        candidate = "{}_{}".format(base, now.strftime("%Y-%m-%d"))
+        if os.path.exists(os.path.join(self.folder, candidate + self._ext())):
+            candidate = "{}_{}".format(base, now.strftime("%Y-%m-%d_%H%M"))
+        self.name_var.set(candidate)
+        self.entry.icursor("end")
+
+    def _change_folder(self) -> None:
+        start = self.folder if os.path.isdir(self.folder) else os.path.expanduser("~")
+        path = filedialog.askdirectory(parent=self, initialdir=start, title="Ordner wählen")
+        if path:
+            self.folder = os.path.normpath(path)
+            self.folder_label.configure(text=self.folder)
+            self._validate()
+
+    def save(self) -> None:
+        if not self._validate():
+            return
+        self.result = self.path()
+        self.destroy()

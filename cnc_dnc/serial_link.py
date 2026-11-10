@@ -302,8 +302,8 @@ class SerialLink:
                 text = norm.feed(decoder.decode(data))
                 if text:
                     self._post("text", text)
-                    if not end_found and detector.feed(text):
-                        end_found = True
+                    # kann sich wieder ändern (z. B. "%" gefolgt von "_N_...")
+                    end_found = detector.feed(text)
                 continue
             if end_found and now - last >= 0.5:
                 reason = "end"

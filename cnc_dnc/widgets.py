@@ -175,14 +175,16 @@ class Led(tk.Frame):
 # --------------------------------------------------------------------------
 
 _NB = r"(?<![A-Za-z_])"
+_I = re.IGNORECASE
 SYNTAX_RULES = [
-    ("blocknr", re.compile(_NB + r"N\d+")),
-    ("gcode", re.compile(_NB + r"G\d+(?:\.\d+)?")),
-    ("mcode", re.compile(_NB + r"M\d+")),
-    ("tool", re.compile(_NB + r"[TDH]\d+")),
-    ("feed", re.compile(_NB + r"[FS][-+]?(?:\d+\.?\d*|\.\d+)")),
+    ("blocknr", re.compile(_NB + r"N\d+", _I)),
+    ("gcode", re.compile(_NB + r"G\d+(?:\.\d+)?", _I)),
+    ("mcode", re.compile(_NB + r"M\d+", _I)),
+    ("tool", re.compile(_NB + r"[TDH]\d+", _I)),
+    ("feed", re.compile(_NB + r"[FS][-+]?(?:\d+\.?\d*|\.\d+)", _I)),
     ("prog", re.compile(r"^\s*(?:%.*|[O:]\d+|<[^>]*>|\d*\s*(?:BEGIN|END)\s+PGM.*)", re.IGNORECASE)),
-    ("comment", re.compile(r"\([^)]*\)?|;.*")),
+    ("comment", re.compile(r";.*")),
+    ("pcomment", re.compile(r"\([^)]*\)?")),  # (Kommentar) – nur Fanuc/ISO
 ]
 
 
@@ -221,6 +223,8 @@ class CodeEditor(tk.Frame):
         self.text.tag_configure("curline", background=C["curline"])
         for name in ("blocknr", "gcode", "mcode", "tool", "feed", "prog", "comment"):
             self.text.tag_configure(name, **SYNTAX[name])
+        self.text.tag_configure("pcomment", **SYNTAX["comment"])
+        self.paren_comments = True
         self.text.tag_configure("prog", font=fonts.mono_bold)
         self.text.tag_configure("found", background=C["found"])
         self.text.tag_raise("sel")
@@ -329,10 +333,23 @@ class CodeEditor(tk.Frame):
         self.schedule_refresh()
         return True
 
-    def goto_line(self, line: int) -> None:
-        self.text.mark_set("insert", "{}.0".format(max(1, line)))
-        self.text.see("insert")
+    def goto_line(self, line: int, top: bool = False) -> None:
+        """Cursor in Zeile ``line`` setzen; mit ``top`` steht die Zeile oben im Fenster."""
+        index = "{}.0".format(max(1, line))
+        self.text.mark_set("insert", index)
+        if top:
+            self.text.yview(index)
+        else:
+            self.text.see("insert")
+        self.text.focus_set()
         self.schedule_refresh()
+
+    def set_paren_comments(self, enabled: bool) -> None:
+        """Bei Sinumerik/Heidenhain sind Klammern Funktionsaufrufe, keine Kommentare."""
+        if enabled != self.paren_comments:
+            self.paren_comments = enabled
+            self.text.tag_remove("pcomment", "1.0", "end")
+            self.schedule_refresh()
 
     # -- Interne Aktualisierung ------------------------------------------------
 
@@ -405,6 +422,8 @@ class CodeEditor(tk.Frame):
             if len(s) > 2000:
                 s = s[:2000]
             for name, rx in SYNTAX_RULES:
+                if name == "pcomment" and not self.paren_comments:
+                    continue
                 for m in rx.finditer(s):
                     self.text.tag_add(name, "{}.{}".format(ln, m.start()), "{}.{}".format(ln, m.end()))
 

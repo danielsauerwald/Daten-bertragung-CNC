@@ -22,7 +22,7 @@ CONTROLS = {
 CONTROL_PRESETS: Dict[str, Dict[str, Any]] = {
     "fanuc": {"frame_percent": True, "end_mode": "percent", "send_eol": "CRLF"},
     "heidenhain": {"frame_percent": False, "end_mode": "endpgm", "send_eol": "CRLF"},
-    "sinumerik": {"frame_percent": False, "end_mode": "m30", "send_eol": "LF"},
+    "sinumerik": {"frame_percent": False, "end_mode": "none", "send_eol": "LF"},
     "generic": {"frame_percent": False, "end_mode": "none", "send_eol": "CRLF"},
 }
 

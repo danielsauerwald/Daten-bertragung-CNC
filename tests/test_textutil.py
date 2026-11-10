@@ -102,3 +102,68 @@ def test_end_detector_split_input():
 def test_end_detector_none():
     d = EndDetector("none")
     assert not d.feed("%\nO1\n%\n")
+
+
+# --------------------------------------------------------------------------
+# Echtes Sinumerik-Werkstück mit mehreren Unterprogrammen
+# --------------------------------------------------------------------------
+
+import os  # noqa: E402
+
+from cnc_dnc.textutil import analyze_program, load_program_file  # noqa: E402
+
+METLOG = os.path.join(os.path.dirname(__file__), "data", "METLOG_300069.txt")
+
+
+def test_sinumerik_workpiece_name_and_programs():
+    text = load_program_file(METLOG)
+    info = analyze_program(text)
+    assert info.name == "METLOG_300069"
+    assert info.workpiece == "METLOG_300069"
+    assert info.dialect == "sinumerik"
+    assert [(ln, name) for ln, name, _ in info.programs] == [
+        (1, "ABSTECH"), (12, "ANSCHLAGEN"), (33, "ENTLADEN"), (56, "HAUPTPROGRAMM"),
+        (71, "KANAL1"), (153, "KANAL2"), (235, "PARAMETER"), (262, "UEBERGABE"),
+    ]
+    assert "Werkstück METLOG_300069" in info.summary() and "8 Programme" in info.summary()
+    assert "\x1a" not in text  # DOS-Dateiende-Zeichen wird entfernt
+
+
+def test_sinumerik_is_not_framed_with_percent():
+    text = load_program_file(METLOG)
+    lines = prepare_lines(text, frame_percent=True)
+    assert lines[0] == "%_N_ABSTECH_MPF"
+    assert lines[-1] == "M17"
+
+
+@pytest.mark.parametrize("mode", ["percent", "m30", "none"])
+def test_sinumerik_headers_do_not_end_reception(mode):
+    """Mehrere %_N_..._MPF-Köpfe dürfen den Empfang nicht vorzeitig beenden."""
+    text = load_program_file(METLOG)
+    d = EndDetector(mode)
+    states = [d.feed(ch) for ch in text]
+    if mode == "m30":
+        # M30 steht erst im Hauptprogramm (Zeile 69) – nicht schon bei M17 oder M2=22
+        first = states.index(True)
+        assert text[:first].count("\n") + 1 == 69
+    else:
+        assert not any(states)
+
+
+def test_percent_end_with_and_without_final_newline():
+    for tail in ("%", "%\n", "%\r\n", "% \n"):
+        d = EndDetector("percent")
+        assert not d.feed("%\nO1\nG0 X1\nM30\n")
+        assert d.feed(tail)
+
+
+def test_fanuc_multi_program_list():
+    info = analyze_program("%\nO0001 (DECKEL)\nG0\nM30\nO0002\nG1\nM30\n%\n")
+    assert info.name == "O0001_DECKEL"
+    assert info.dialect == "fanuc"
+    assert [(ln, n) for ln, n, _ in info.programs] == [(2, "O0001 (DECKEL)"), (5, "O0002")]
+
+
+def test_heidenhain_name():
+    info = analyze_program("0 BEGIN PGM PLATTE MM\n1 BLK FORM 0.1 Z X+0\n2 END PGM PLATTE MM\n")
+    assert (info.name, info.dialect) == ("PLATTE", "heidenhain")

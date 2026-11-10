@@ -139,7 +139,10 @@ def prepare_lines(
         lines.pop(0)
     if skip_empty_lines:
         lines = [ln for ln in lines if ln.strip()]
-    if frame_percent:
+    # Sinumerik-Köpfe wie "%_N_TEIL_MPF" beginnen auch mit %, dürfen aber nicht
+    # zusätzlich eingerahmt werden – sonst lehnt die Steuerung das Programm ab.
+    sinumerik_head = bool(lines) and lines[0].lstrip().startswith("%") and lines[0].strip() != "%"
+    if frame_percent and not sinumerik_head:
         if not lines or lines[0].strip() != "%":
             lines.insert(0, "%")
         if len(lines) < 2 or lines[-1].strip() != "%":
@@ -192,41 +195,54 @@ def find_problem_chars(text: str, limit: int = 20) -> List[Tuple[int, str]]:
 END_MODES = {
     "percent": "Beim zweiten % (Fanuc/ISO)",
     "endpgm": "Bei END PGM (Heidenhain)",
-    "m30": "Nach M30 / M02 / M17",
+    "m30": "Nach M30 / M02",
     "none": "Nur nach Zeit ohne Daten",
 }
 
 _END_PGM_RE = re.compile(r"^\s*\d*\s*END\s+PGM\b", re.IGNORECASE)
-_M30_RE = re.compile(r"(?<![A-Z0-9.])M0*(30|2|17)(?![0-9])", re.IGNORECASE)
+_M30_RE = re.compile(r"(?<![A-Z0-9.=])M0*(30|2)(?![0-9=])", re.IGNORECASE)
 
 
 class EndDetector:
-    """Erkennt im empfangenen (normalisierten) Text das Programmende."""
+    """Erkennt im empfangenen (normalisierten) Text das Programmende.
+
+    ``feed`` liefert den aktuellen Stand. Im %-Modus kann ein Ende auch wieder
+    zurückgenommen werden: Ein ``%`` am Zeilenanfang zählt nur, wenn danach
+    nichts weiter in der Zeile steht. So beendet ein Sinumerik-Kopf wie
+    ``%_N_TEIL_MPF`` den Empfang nicht vorzeitig.
+    """
 
     def __init__(self, mode: str = "none") -> None:
         self.mode = mode
         self.percent_count = 0
-        self.in_comment = False
+        self.pending_percent = False
+        self.at_line_start = True
         self.partial = ""
         self.found = False
 
     def feed(self, text: str) -> bool:
-        if self.found or self.mode == "none" or not text:
+        if self.mode == "none" or not text:
             return self.found
         if self.mode == "percent":
             for ch in text:
-                if ch == "(":
-                    self.in_comment = True
-                elif ch == ")":
-                    self.in_comment = False
-                elif ch == "\n":
-                    self.in_comment = False
-                elif ch == "%" and not self.in_comment:
-                    self.percent_count += 1
-                    if self.percent_count >= 2:
-                        self.found = True
-                        break
+                if ch == "\n":
+                    if self.pending_percent:
+                        self.percent_count += 1
+                        self.pending_percent = False
+                    self.at_line_start = True
+                elif self.pending_percent:
+                    if ch not in " \t\r":
+                        self.pending_percent = False  # z. B. "%_N_..." – kein Programmende
+                        self.at_line_start = False
+                elif self.at_line_start:
+                    if ch == "%":
+                        self.pending_percent = True
+                    elif ch not in " \t\r":
+                        self.at_line_start = False
+            self.found = self.percent_count + (1 if self.pending_percent else 0) >= 2
             return self.found
+        if self.found:
+            return True
         # zeilenweise Modi
         data = self.partial + text
         lines = data.split("\n")
@@ -247,7 +263,7 @@ class EndDetector:
 
 
 # --------------------------------------------------------------------------
-# Programmname / Dateiname
+# Programm analysieren: Name, Steuerung, enthaltene Programme
 # --------------------------------------------------------------------------
 
 _INVALID_FS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -260,38 +276,116 @@ def safe_filename(name: str, max_len: int = 60) -> str:
     return name[:max_len].strip("_")
 
 
-def detect_program_name(text: str) -> Optional[str]:
-    """Programmnamen aus dem Programmkopf ableiten (z. B. ``O1234_FLANSCH``)."""
-    head = text.split("\n", 40)[:40]
-    for line in head:
+DIALECT_NAMES = {"sinumerik": "Sinumerik", "fanuc": "Fanuc / ISO", "heidenhain": "Heidenhain"}
+
+_SIN_HEAD = re.compile(r"^%_N_(\w+)_([A-Za-z]{3})\s*$")          # %_N_KANAL1_MPF
+_SIN_OLD_HEAD = re.compile(r"^%((?:MPF|SPF)\d+)\s*$", re.IGNORECASE)  # %MPF100
+_SIN_PATH = re.compile(r"^;\s*\$PATH\s*=\s*(\S+)", re.IGNORECASE)  # ;$PATH=/_N_WKS_DIR/_N_TEIL_WPD
+_SIN_WPD = re.compile(r"_N_(\w+?)_WPD\b", re.IGNORECASE)
+_HEID_HEAD = re.compile(r"^\d*\s*BEGIN\s+PGM\s+(\S+)", re.IGNORECASE)
+_FANUC_O = re.compile(r"^([O:])\s*(\d{1,8})\s*(?:\((.*?)\)?)?\s*$", re.IGNORECASE)
+_FANUC_NAME = re.compile(r"^<([^>]+)>")
+_PAREN_COMMENT = re.compile(r"\(([^)]+)\)")
+
+
+class ProgramInfo:
+    """Was in einem Programmtext steckt."""
+
+    def __init__(self) -> None:
+        self.name: Optional[str] = None       # Vorschlag für den Dateinamen
+        self.dialect: Optional[str] = None    # "sinumerik" | "fanuc" | "heidenhain" | None
+        self.workpiece: Optional[str] = None  # Sinumerik-Werkstück (…_WPD)
+        self.programs: List[Tuple[int, str, str]] = []  # (Zeile, Name, Typ z. B. "MPF")
+
+    def summary(self) -> str:
+        parts = []
+        if self.workpiece:
+            parts.append("Werkstück " + self.workpiece)
+        elif self.name:
+            parts.append(self.name)
+        if self.dialect:
+            parts.append(DIALECT_NAMES[self.dialect])
+        n = len(self.programs)
+        if n > 1:
+            parts.append("{} Programme".format(n))
+        return "  ·  ".join(parts)
+
+
+def analyze_program(text: str) -> ProgramInfo:
+    """Programmname, Steuerungsart und alle enthaltenen (Unter-)Programme finden.
+
+    Beispiele für den Namen:
+      Sinumerik-Werkstück  ;$PATH=/_N_WKS_DIR/_N_METLOG_300069_WPD  -> METLOG_300069
+      Sinumerik            %_N_WELLE_MPF                            -> WELLE
+      Heidenhain           0 BEGIN PGM TEIL1 MM                     -> TEIL1
+      Fanuc                O1234 (FLANSCH)                          -> O1234_FLANSCH
+    """
+    info = ProgramInfo()
+    first_name: Optional[str] = None
+    first_comment: Optional[str] = None
+    fanuc_hint = False
+    for no, line in enumerate(text.split("\n"), start=1):
         s = line.strip()
-        if not s or s == "%":
+        if not s:
             continue
-        # Sinumerik: %_N_TEIL1_MPF
-        m = re.match(r"%_N_(\w+?)_(MPF|SPF)\b", s, re.IGNORECASE)
-        if m:
-            return safe_filename(m.group(1))
-        # Heidenhain: 0 BEGIN PGM TEIL1 MM
-        m = re.match(r"\d*\s*BEGIN\s+PGM\s+(\S+)", s, re.IGNORECASE)
-        if m:
-            return safe_filename(m.group(1))
-        # Fanuc: O1234 (KOMMENTAR)  oder  :1234
-        m = re.match(r"([O:])\s*(\d{1,8})\s*(?:\((.*?)\)?)?\s*$", s, re.IGNORECASE)
-        if m:
-            name = "O" + m.group(2)
-            if m.group(3):
-                name += "_" + m.group(3)
-            return safe_filename(name)
-        # Fanuc 30i: <PROGRAMMNAME>
-        m = re.match(r"<([^>]+)>", s)
-        if m:
-            return safe_filename(m.group(1))
-    # Fallback: erster Kommentar
-    for line in head:
-        m = re.search(r"\(([^)]+)\)", line)
-        if m and m.group(1).strip():
-            return safe_filename(m.group(1))
-    return None
+        c = s[0]
+        if c == "%":
+            if s == "%":
+                fanuc_hint = True
+                continue
+            m = _SIN_HEAD.match(s) or _SIN_OLD_HEAD.match(s)
+            if m:
+                info.dialect = "sinumerik"
+                typ = m.group(2).upper() if m.lastindex and m.lastindex >= 2 else m.group(1)[:3].upper()
+                info.programs.append((no, m.group(1), typ))
+                first_name = first_name or m.group(1)
+            continue
+        if c == ";":
+            m = _SIN_PATH.match(s)
+            if m:
+                info.dialect = "sinumerik"
+                w = _SIN_WPD.search(m.group(1))
+                if w and not info.workpiece:
+                    info.workpiece = w.group(1)
+            continue
+        if c in "Oo:":
+            m = _FANUC_O.match(s)
+            if m:
+                name = "O" + m.group(2)
+                info.programs.append((no, name + (" (" + m.group(3).strip() + ")" if m.group(3) else ""), ""))
+                if first_name is None:
+                    first_name = name + ("_" + m.group(3) if m.group(3) and m.group(3).strip() else "")
+                fanuc_hint = True
+                continue
+        if c == "<":
+            m = _FANUC_NAME.match(s)
+            if m:
+                info.programs.append((no, m.group(1), ""))
+                first_name = first_name or m.group(1)
+                fanuc_hint = True
+                continue
+        if c.isdigit() or c in "Bb":
+            m = _HEID_HEAD.match(s)
+            if m:
+                info.dialect = info.dialect or "heidenhain"
+                info.programs.append((no, m.group(1), "PGM"))
+                first_name = first_name or m.group(1)
+                continue
+        if first_comment is None and no <= 40 and "(" in s:
+            m = _PAREN_COMMENT.search(s)
+            if m and m.group(1).strip():
+                first_comment = m.group(1)
+
+    if info.dialect is None and fanuc_hint:
+        info.dialect = "fanuc"
+    raw = info.workpiece or first_name or first_comment
+    info.name = safe_filename(raw) if raw else None
+    return info
+
+
+def detect_program_name(text: str) -> Optional[str]:
+    """Vorschlag für den Dateinamen (siehe :func:`analyze_program`)."""
+    return analyze_program(text).name
 
 
 def count_lines(text: str) -> int:

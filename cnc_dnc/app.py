@@ -14,10 +14,13 @@ from . import APP_NAME, APP_VERSION, dialogs
 from .config import AppConfig, MachineProfile
 from .serial_link import SerialError, SerialLink
 from .serial_link import serial as pyserial
+from .system import open_touch_keyboard
 from .textutil import (
+    DIALECT_NAMES,
+    ProgramInfo,
+    analyze_program,
     build_send_chunks,
     count_lines,
-    detect_program_name,
     find_problem_chars,
     load_program_file,
     save_program_file,
@@ -41,26 +44,6 @@ def fmt_duration(seconds: float) -> str:
     return "{}:{:02d}".format(s // 60, s % 60)
 
 
-def open_touch_keyboard() -> bool:
-    """Bildschirmtastatur von Windows öffnen (Tablet-Eingabebereich oder OSK)."""
-    if not IS_WIN:
-        return False
-    candidates = []
-    for base in (os.environ.get("CommonProgramW6432"), os.environ.get("CommonProgramFiles")):
-        if base:
-            candidates.append(os.path.join(base, "microsoft shared", "ink", "TabTip.exe"))
-    windir = os.environ.get("WINDIR", r"C:\Windows")
-    candidates += [os.path.join(windir, "Sysnative", "osk.exe"), os.path.join(windir, "System32", "osk.exe")]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                os.startfile(path)  # type: ignore[attr-defined]
-                return True
-            except OSError:
-                continue
-    return False
-
-
 class App:
     def __init__(self, root: tk.Tk, config: AppConfig) -> None:
         self.root = root
@@ -73,7 +56,9 @@ class App:
         self.current_path: Optional[str] = None
         self.origin = "new"  # "new" | "file" | "received"
         self.dirty = False
-        self.received_name: Optional[str] = None
+        self.doc_info = ProgramInfo()
+        self._analyze_job: Optional[str] = None
+        self._last_analyze = 0.0
         self.transfer: Optional[Dict] = None
         self.tx_until = 0.0
         self.rx_until = 0.0
@@ -224,12 +209,22 @@ class App:
 
         info = tk.Frame(center, bg=C["bg"])
         info.grid(row=0, column=0, sticky="ew", pady=(0, px(r, 8)))
-        self.doc_label = tk.Label(info, text="", bg=C["bg"], fg=C["text"], font=f.heading, anchor="w")
-        self.doc_label.pack(side="left")
-        self.dirty_label = tk.Label(info, text="", bg=C["bg"], fg=C["warn"], font=f.small_bold)
-        self.dirty_label.pack(side="left", padx=(px(r, 10), 0))
+        # Rechte Seite zuerst packen, damit sie bei langen Namen nicht zusammengedrückt wird
         self.cursor_label = tk.Label(info, text="", bg=C["bg"], fg=C["muted"], font=f.ui)
         self.cursor_label.pack(side="right")
+        left = tk.Frame(info, bg=C["bg"])
+        left.pack(side="left", fill="x", expand=True)
+        self._info_left = left
+        title_row = tk.Frame(left, bg=C["bg"])
+        title_row.pack(anchor="w")
+        self.doc_label = tk.Label(title_row, text="", bg=C["bg"], fg=C["text"], font=f.heading, anchor="w")
+        self.doc_label.pack(side="left")
+        self.dirty_label = tk.Label(title_row, text="", bg=C["bg"], fg=C["warn"], font=f.small_bold)
+        self.dirty_label.pack(side="left", padx=(px(r, 10), 0))
+        self.doc_sub = tk.Label(left, text="", bg=C["bg"], fg=C["muted"], font=f.small, anchor="w")
+        self.doc_sub.pack(anchor="w")
+        # Sprungliste, wenn mehrere (Unter-)Programme in einer Datei stehen
+        self.progs_btn = ttk.Button(info, text="", style="Small.TButton", command=self._show_program_menu)
 
         # Suchleiste (ausgeblendet, bis "Suchen" gedrückt wird)
         self.find_bar = tk.Frame(center, bg=C["bg"])
@@ -513,11 +508,10 @@ class App:
             return
         self.editor.set_text("")
         self.current_path = None
-        self.received_name = None
         self.origin = "received"
         self.dirty = False
-        self._update_title()
         self._begin_transfer("receive")
+        self._reanalyze()
 
     def cancel_transfer(self) -> None:
         if not self.transfer:
@@ -594,6 +588,8 @@ class App:
                     text="Bereit – jetzt an der Steuerung die Ausgabe starten (PUNCH).  ·  {}".format(elapsed),
                     fg=C["primary"])
             else:
+                if now - self._last_analyze > 1.0:
+                    self._reanalyze()
                 lines = self.editor.line_count()
                 detail = "{} Zeilen  ·  {} Bytes  ·  {}".format(fmt_int(lines), fmt_int(t["rx_bytes"]), elapsed)
                 timeout = self.machine.idle_timeout_s
@@ -622,16 +618,15 @@ class App:
         self.editor.clear_undo()
         if has_text:
             self.dirty = True
-            name = detect_program_name(self.editor.get_text())
-            self.received_name = name
-        self._update_title()
+        self._reanalyze()
         if ok and has_text:
             if self.machine.auto_save_received:
                 if self.save(silent=True):
                     self.set_status("✓  {}  Automatisch gespeichert: {}".format(
                         message, os.path.basename(self.current_path or "")), "ok")
                 return
-            self.set_status("✓  {}  Jetzt „Speichern“ antippen.".format(message), "ok")
+            found = "  Erkannt: {}.".format(self.doc_info.name) if self.doc_info.name else ""
+            self.set_status("✓  {}{}  Jetzt „Speichern“ antippen.".format(message, found), "ok")
         elif not has_text:
             self.set_status(message, "warn")
         else:
@@ -808,15 +803,18 @@ class App:
             return
         self.editor.set_text(text)
         self.current_path = os.path.normpath(path)
-        self.received_name = None
         self.origin = "file"
         self.dirty = False
-        self._update_title()
+        self._reanalyze()
         self.refresh_files()
         self.set_status("Geöffnet: {}  ({} Zeilen)".format(os.path.basename(path), fmt_int(count_lines(text))))
 
     def save(self, silent: bool = False) -> bool:
-        """Speichern ohne Nachfrage: bekannte Datei überschreiben, sonst automatisch benennen."""
+        """Bekannte Datei überschreiben; sonst Speichern-Fenster mit erkanntem Namen.
+
+        ``silent`` (automatisches Speichern nach dem Empfang): ohne Fenster, mit
+        erkanntem Namen; eine vorhandene Datei wird dabei nie überschrieben.
+        """
         if self.busy:
             return False
         text = self.editor.get_text()
@@ -826,45 +824,55 @@ class App:
             return False
         if self.current_path:
             return self._write(self.current_path)
-        folder = self.machine.program_folder()
-        try:
-            os.makedirs(folder, exist_ok=True)
-        except OSError as exc:
-            dialogs.error(self.root, self.fonts, "Ordner nicht verfügbar", str(exc))
+        if not silent:
+            return self._save_with_dialog()
+        return self._write(self._auto_path(self.machine.program_folder(), text))
+
+    def save_as(self) -> bool:
+        if self.busy:
             return False
-        return self._write(self._auto_path(folder, text))
+        return self._save_with_dialog()
+
+    def _suggested_name(self) -> str:
+        return self.doc_info.name or "Programm_" + datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
 
     def _auto_path(self, folder: str, text: str) -> str:
         ext = self.machine.file_ext or ""
         stamp = datetime.datetime.now()
-        base = detect_program_name(text) or "Programm_" + stamp.strftime("%Y-%m-%d_%H%M")
+        base = analyze_program(text).name or "Programm_" + stamp.strftime("%Y-%m-%d_%H%M")
         path = os.path.join(folder, base + ext)
         if os.path.exists(path):
             path = os.path.join(folder, "{}_{}{}".format(base, stamp.strftime("%Y-%m-%d_%H%M%S"), ext))
         return path
 
-    def save_as(self) -> bool:
-        if self.busy:
-            return False
+    def _save_with_dialog(self) -> bool:
         text = self.editor.get_text()
-        folder = os.path.dirname(self.current_path) if self.current_path else self.machine.program_folder()
-        try:
-            os.makedirs(folder, exist_ok=True)
-        except OSError:
-            folder = os.path.expanduser("~")
+        if not text.strip():
+            dialogs.info(self.root, self.fonts, "Nichts zu speichern", "Der Editor ist leer.")
+            return False
+        self._reanalyze()
+        m = self.machine
         if self.current_path:
-            initial = os.path.basename(self.current_path)
+            folder = os.path.dirname(self.current_path)
+            base, ext = os.path.splitext(os.path.basename(self.current_path))
+            title = "Speichern unter"
         else:
-            initial = os.path.basename(self._auto_path(folder, text))
-        ext = self.machine.file_ext or ".nc"
-        path = filedialog.asksaveasfilename(parent=self.root, initialdir=folder, initialfile=initial,
-                                            defaultextension=ext, filetypes=FILE_TYPES, title="Speichern unter")
+            folder = m.program_folder()
+            base, ext = self._suggested_name(), m.file_ext
+            title = "Programm speichern"
+        detected = self.doc_info.summary() if self.doc_info.name else ""
+        path = dialogs.SaveDialog(self.root, self.fonts, base, ext, folder, detected=detected, title=title).show()
         if not path:
             return False
+        new_ext = os.path.splitext(path)[1]
+        if not self.current_path and new_ext and new_ext.lower() != (m.file_ext or "").lower():
+            m.file_ext = new_ext  # gewählte Endung für diese Maschine merken
+            self._save_config()
         return self._write(path)
 
     def _write(self, path: str) -> bool:
         try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             save_program_file(path, self.editor.get_text())
         except OSError as exc:
             dialogs.error(self.root, self.fonts, "Speichern fehlgeschlagen", str(exc))
@@ -884,7 +892,7 @@ class App:
         self.current_path = None
         self.origin = "new"
         self.dirty = False
-        self._update_title()
+        self._reanalyze()
         self.refresh_files()
         self.editor.focus_editor()
 
@@ -907,26 +915,78 @@ class App:
         if not self.dirty and not self.busy:
             self.dirty = True
             self._update_title()
+        # Programmname/Inhalt neu bestimmen, sobald eine Weile nicht getippt wird
+        if self._analyze_job is not None:
+            self.root.after_cancel(self._analyze_job)
+        self._analyze_job = self.root.after(700, self._reanalyze)
+
+    def _reanalyze(self) -> None:
+        """Name, Steuerung und enthaltene Programme ermitteln und anzeigen."""
+        self._analyze_job = None
+        self._last_analyze = time.monotonic()
+        self.doc_info = analyze_program(self.editor.get_text())
+        # Bei Sinumerik/Heidenhain sind Klammern keine Kommentare
+        self.editor.set_paren_comments(self.doc_info.dialect not in ("sinumerik", "heidenhain"))
+        n = len(self.doc_info.programs)
+        if n > 1:
+            self.progs_btn.configure(text="≡  {} Programme  ▾".format(n))
+            if not self.progs_btn.winfo_manager():
+                self.progs_btn.pack(side="right", padx=(px(self.root, 10), px(self.root, 14)),
+                                    before=self._info_left)
+        elif self.progs_btn.winfo_manager():
+            self.progs_btn.pack_forget()
+        self._update_title()
+
+    def _show_program_menu(self) -> None:
+        progs = self.doc_info.programs
+        if not progs:
+            return
+        menu = tk.Menu(self.root, tearoff=0, font=self.fonts.list, bg=C["surface"], fg=C["text"],
+                       activebackground=C["select"], activeforeground=C["text"], bd=1)
+        for line, name, typ in progs:
+            label = "{}{}    ·  Zeile {}".format(name, "  (" + typ + ")" if typ else "", fmt_int(line))
+            menu.add_command(label=label, command=lambda ln=line: self.editor.goto_line(ln, top=True))
+        b = self.progs_btn
+        try:
+            menu.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
+        finally:
+            menu.grab_release()
 
     def _on_cursor(self, line: int, col: int, total: int) -> None:
-        self.cursor_label.configure(text="Zeile {} von {}   ·   Spalte {}".format(fmt_int(line), fmt_int(total), col))
+        self.cursor_label.configure(text="Zeile {} / {}  ·  Sp. {}".format(fmt_int(line), fmt_int(total), col))
 
     def _update_title(self) -> None:
+        info = self.doc_info
+        unsaved_receive = self.origin == "received" and not self.current_path
         if self.current_path:
             name = os.path.basename(self.current_path)
-        elif self.origin == "received":
-            name = "Empfangenes Programm"
-            if self.received_name and not self.busy:
-                name += " – " + self.received_name
+        elif unsaved_receive:
+            name = info.name or "Empfangenes Programm"
         else:
-            name = "Neues Programm"
+            name = info.name or "Neues Programm"
+        has_text = not self.editor.is_empty()
         self.doc_label.configure(text=name)
-        self.dirty_label.configure(text="●  nicht gespeichert" if self.dirty and not self.editor.is_empty() else "")
+        self.dirty_label.configure(text="●  nicht gespeichert" if self.dirty and has_text else "")
+        parts = []
+        if unsaved_receive:
+            parts.append("Empfangen von " + self.machine.display_name)
+        if info.dialect:
+            parts.append(DIALECT_NAMES[info.dialect])
+        self.doc_sub.configure(text="  ·  ".join(parts))
         self.root.title("{}{} – {}".format(name, " *" if self.dirty else "", APP_NAME))
+
         if self.current_path:
             self.save_btn.set_text(subtitle="Datei überschreiben")
+        elif has_text:
+            target = self._suggested_name() + (self.machine.file_ext or "")
+            if len(target) > 26:
+                target = target[:25] + "…"
+            self.save_btn.set_text(subtitle="als " + target)
         else:
-            self.save_btn.set_text(subtitle="neu im Maschinenordner")
+            self.save_btn.set_text(subtitle="mit Namen aus dem Programm")
+        # Nach dem Empfang auffällig machen: hier geht es weiter
+        self.save_btn.set_kind("primary" if unsaved_receive and self.dirty and has_text and not self.busy
+                               else "neutral")
 
     def toggle_find(self, show: Optional[bool] = None) -> None:
         visible = bool(self.find_bar.winfo_manager())
@@ -1008,5 +1068,7 @@ class App:
         except tk.TclError:
             pass
         self._save_config()
+        if self._analyze_job is not None:
+            self.root.after_cancel(self._analyze_job)
         self.link.close()
         self.root.destroy()
