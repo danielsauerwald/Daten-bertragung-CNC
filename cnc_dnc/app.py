@@ -316,7 +316,7 @@ class App:
             for i, b in enumerate(buttons):
                 w = weights[i] if weights else 1
                 fr.grid_columnconfigure(i, weight=w, uniform="btn")
-                b.grid(row=0, column=i, sticky="ew",
+                b.grid(row=0, column=i, sticky="nsew",
                        padx=(0 if i == 0 else px(r, 3), 0 if i == len(buttons) - 1 else px(r, 3)))
 
         self.send_btn = ActionButton(side, f, "Senden", subtitle="PC  →  Maschine", icon="▶", kind="primary",
@@ -333,17 +333,22 @@ class App:
         self.new_btn = ActionButton(fr, f, "Neu", kind="neutral", compact=True, anchor="center",
                                     command=self.new_document)
         place_row(fr, [self.open_btn, self.new_btn])
-        self.save_btn = ActionButton(side, f, "Speichern", subtitle="", kind="neutral", compact=True,
+        # "Speichern" und daneben klein "unter …" (= Speichern unter) – spart eine Zeile
+        fr = row(gap=10)
+        self.save_btn = ActionButton(fr, f, "Speichern", subtitle="", kind="neutral", compact=True,
                                      command=self.save)
-        add(self.save_btn)
-        self.saveas_btn = ActionButton(side, f, "Speichern unter …", kind="neutral", compact=True,
+        self.saveas_btn = ActionButton(fr, f, "unter …", kind="neutral", compact=True, anchor="center",
                                        command=self.save_as)
-        add(self.saveas_btn, gap=10)
+        place_row(fr, [self.save_btn, self.saveas_btn], weights=(2, 1))
+        self.saveas_btn.title_label.configure(font=f.small_bold)
 
         add(self._section(side, "BEARBEITEN"), gap=4)
         self.compact_btn = ActionButton(side, f, "Zusammenrücken", kind="neutral", compact=True,
                                         command=self.compact)
         add(self.compact_btn)
+        self.number_btn = ActionButton(side, f, "Nummerieren …", kind="neutral", compact=True,
+                                       command=self.renumber)
+        add(self.number_btn)
         self.setup_btn = ActionButton(side, f, "Einrichteblatt …", kind="neutral", compact=True,
                                       command=self.setup_sheet)
         add(self.setup_btn, gap=10)
@@ -653,7 +658,7 @@ class App:
 
     def _set_busy(self, busy: bool) -> None:
         for b in (self.send_btn, self.recv_btn, self.open_btn, self.save_btn, self.saveas_btn, self.new_btn,
-                  self.compact_btn, self.setup_btn, self.machine_btn, self.machines_btn, self.connect_btn):
+                  self.compact_btn, self.number_btn, self.setup_btn, self.machine_btn, self.machines_btn, self.connect_btn):
             b.set_enabled(not busy)
         self.undo_btn.state(["disabled"] if busy else ["!disabled"])
         self.editor.set_readonly(busy)
@@ -1162,6 +1167,42 @@ class App:
                 self.set_status("✓  Einrichteblatt gespeichert.", "ok")
             else:
                 self.set_status("✓  Einrichteblatt erstellt: " + res, "ok")
+
+    def renumber(self) -> None:
+        """Satznummern setzen/entfernen – Schema im Fenster wählbar, rückgängig machbar."""
+        if self.busy:
+            return
+        text = self.editor.get_text()
+        if not text.strip():
+            dialogs.info(self.root, self.fonts, "Nichts zu nummerieren", "Der Editor ist leer.")
+            return
+        from .numbering import SCHEMES
+        from .numbering_dialog import RenumberDialog
+
+        dialect = analyze_program(text).dialect
+        res = RenumberDialog(self.root, self.fonts, text, dialect, self.cfg.renumber_scheme,
+                             self.cfg.renumber_step).show()
+        if not res:
+            return
+        scheme, step, result = res
+        if dialect != "heidenhain":
+            self.cfg.renumber_scheme, self.cfg.renumber_step = scheme, step
+            self._save_config()
+        if result.text == text:
+            self.set_status("Die Satznummern sind schon so.", "info")
+            return
+        self.editor.replace_all(result.text)
+        self.dirty = True
+        self._reanalyze()
+        if scheme == "remove" and dialect != "heidenhain":
+            msg = "✓  Satznummern entfernt."
+        else:
+            msg = "✓  {} Sätze nummeriert ({}{}).".format(
+                fmt_int(result.numbered), "Heidenhain" if dialect == "heidenhain" else SCHEMES[scheme],
+                ", Schritt {}".format(step) if scheme in ("tool", "flat") and dialect != "heidenhain" else "")
+        if result.refs:
+            msg += " {} Verweise angepasst.".format(result.refs)
+        self.set_status(msg + "  Zurück mit „↶ Rückgängig“.", "ok")
 
     def compact(self) -> None:
         """Leerzeilen entfernen, vor jedem Werkzeugaufruf zwei Leerzeilen (rückgängig machbar)."""

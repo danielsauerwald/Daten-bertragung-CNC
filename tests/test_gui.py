@@ -279,7 +279,7 @@ def test_all_buttons_visible_on_tablet_screen(app):
         time.sleep(0.05)
     bottom = app.root.winfo_rooty() + app.root.winfo_height()
     right = app.root.winfo_rootx() + app.root.winfo_width()
-    for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "compact_btn", "setup_btn",
+    for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "compact_btn", "number_btn", "setup_btn",
                  "find_btn", "zoom_out_btn", "zoom_in_btn", "machines_btn", "connect_btn", "machine_btn",
                  "hide_files_btn", "undo_btn"):
         w = getattr(app, name)
@@ -409,3 +409,33 @@ def test_setup_sheet_flow(app, tmp_path, monkeypatch):
 
     data = load_sheet(prog)
     assert data.fields["hsp_druck"] == "25" and data.notes == "Erstes Teil messen"
+
+
+def test_renumber_button_flow(app, monkeypatch):
+    from cnc_dnc.numbering_dialog import RenumberDialog
+    from cnc_dnc.textutil import load_program_file
+
+    original = load_program_file(os.path.join(os.path.dirname(__file__), "data", "METLOG_300069.txt"))
+    app.editor.set_text(original)
+    seen = {}
+
+    def fake_show(self):
+        seen["preview"] = self.preview.get("1.0", "end")
+        seen["msg"] = self.message.cget("text")
+        self.scheme_var.set("flat")
+        self._update()
+        seen["flat_preview"] = self.preview.get("1.0", "end")
+        self.ok()
+        return self.result
+
+    monkeypatch.setattr(RenumberDialog, "show", fake_show)
+    app.renumber()
+    assert "N1000 T12D1" in seen["preview"] and "Sätze bekommen eine Nummer" in seen["msg"]
+    assert "N10 T12D1" in seen["flat_preview"]
+    text = app.editor.get_text()
+    assert "\nN10 T12D1 G96" in text and app.dirty
+    assert app.cfg.renumber_scheme == "flat"
+    assert "nummeriert" in app.status_text.cget("text")
+    app.undo()
+    app.root.update()
+    assert app.editor.get_text() == original

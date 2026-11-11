@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.5
+# CNC-Datenübertragung 2.6
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -35,6 +35,8 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
 - **Kundenordner wird beim Speichern vorgeschlagen**, siehe [Kundenordner](#kundenordner).
 - **Zusammenrücken** auf Knopfdruck: Leerzeilen raus, vor jedem Werkzeug zwei Leerzeilen,
   siehe [Zusammenrücken](#zusammenrücken).
+- **Satznummern** auf Knopfdruck: pro Werkzeug (N1000, N2000 …), durchgehend, nur an
+  Werkzeugwechseln oder entfernen, siehe [Nummerieren](#nummerieren).
 - **Einrichteblatt als PDF**: Werkzeuge nach Seite 1 / Seite 2 mit dem Kommentar aus dem
   Programm, dazu Spanndruck, Teil und Notizen, siehe [Einrichteblatt](#einrichteblatt).
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
@@ -119,7 +121,8 @@ wartet, bis die Steuerung bereit ist.
    Dann wird ohne Fenster gespeichert, und vorhandene Dateien werden nie überschrieben.
 
 Ist eine Datei schon gespeichert, überschreibt **Speichern** sie direkt.
-**Speichern unter …** öffnet das Fenster, um einen anderen Namen oder Ordner zu wählen.
+Der kleine Knopf **unter …** daneben (= Speichern unter) öffnet das Fenster, um einen
+anderen Namen oder Ordner zu wählen.
 
 ### Sinumerik-Werkstücke mit mehreren Programmen
 
@@ -167,6 +170,29 @@ Die Taste **Zusammenrücken** (rechts unter „BEARBEITEN“) räumt das Program
 
 Zweimal Zusammenrücken ändert nichts mehr. Mit **↶ Rückgängig** über dem Editor holt man
 den alten Stand mit einem Tipp zurück. Gespeichert wird erst mit „Speichern“.
+
+## Nummerieren
+
+Die Taste **Nummerieren …** (rechts unter „BEARBEITEN“) setzt Satznummern. Im Fenster
+wählt man das Schema und sieht vorher eine Vorschau:
+
+| Schema | Beispiel | Wofür |
+|---|---|---|
+| **Pro Werkzeug** (empfohlen) | `N1000 T01D1 …`, `N1010 …` / `N2000 T02D1 …` | Die Nummer zeigt das Werkzeug. Nach Werkzeugbruch steigt man z. B. bei N3000 wieder ein. Sätze vor dem ersten Werkzeug: N10, N20 … |
+| **Durchgehend** | `N10`, `N20`, `N30` … | klassisch |
+| **Nur Werkzeugwechsel** | `N1 T01D1 …`, `N2 T02D1 …` | nur die Werkzeugzeilen bekommen eine Nummer |
+| **Nummern entfernen** | | Sinumerik braucht keine N-Nummern, das Programm wird kürzer |
+
+- Jedes Programm einer Datei (`%_N_…_MPF`, `O1234`) fängt wieder vorne an.
+- Keine Nummer bekommen Kommentarzeilen, Leerzeilen, Programmköpfe, `;$PATH=`,
+  Sprungmarken (`ENDE:`) und `%`. Vorhandene Nummern werden ersetzt.
+- Die Schrittweite (10, 5, 2, 1) ist wählbar. Das Programm merkt sich die letzte Wahl.
+- **Verweise auf Satznummern werden mitgeführt:** Fanuc-Zyklen `G70`–`G73 P… Q…`,
+  `GOTO n`, `M99 Pn` und Sinumerik `GOTOF/GOTOB Nn`. Zeigt ein Verweis ins Leere oder
+  auf eine doppelte Nummer, ändert das Programm nichts und sagt warum.
+  Programme mit solchen Verweisen können nicht entnummeriert werden.
+- Bei Heidenhain werden die Sätze lückenlos 0, 1, 2 … durchgezählt.
+- Mit **↶ Rückgängig** ist alles mit einem Tipp zurückgenommen.
 
 ## Einrichteblatt
 

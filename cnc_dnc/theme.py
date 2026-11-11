@@ -162,6 +162,11 @@ def setup_style(root: tk.Tk, fonts: Fonts) -> ttk.Style:
               indicatorforeground=[("selected", "#FFFFFF")])
     style.configure("Surface.TCheckbutton", background=C["surface"])
     style.map("Surface.TCheckbutton", background=[("active", C["surface"])])
+    # große Auswahlpunkte (z. B. Satznummern-Schema)
+    style.configure("Big.TRadiobutton", background=C["surface"], font=fonts.button, indicatorsize=px(root, 20),
+                    padding=(px(root, 2), px(root, 4)), indicatorbackground=C["surface"])
+    style.map("Big.TRadiobutton", background=[("active", C["surface"])],
+              indicatorbackground=[("selected", C["primary"]), ("pressed", C["neutral_press"])])
 
     # Normale ttk-Buttons (in Dialogen)
     for name, bg, hover, press, fg in (

@@ -93,6 +93,11 @@ def main(argv=None) -> int:
         render_setup_sheet(pdf, SheetContext("SELBSTTEST", "Maschine", "Kunde", "x.txt"),
                            extract_tools(sample), [], SheetData())
         assert open(pdf, "rb").read(8) == b"%PDF-1.4"
+        # Satznummern: Modul vorhanden und Zyklus-Verweise werden mitgeführt
+        from .numbering import renumber
+        from .numbering_dialog import RenumberDialog  # noqa: F401
+
+        assert "N1030 G70 P1010 Q1020" in renumber("O1\nN5 T1\nN6 G0\nN7 G1\nN8 G70 P6 Q7\n", "tool").text
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)
@@ -128,6 +133,10 @@ def run() -> None:
     except SystemExit:
         raise
     except Exception:
+        if "--selftest" in sys.argv:
+            # automatischer Test: kein Meldungsfenster, das niemand wegklickt
+            print("Selbsttest FEHLGESCHLAGEN:\n" + traceback.format_exc(), file=sys.stderr)
+            sys.exit(1)
         _log_error(traceback.format_exc())
         _show_fatal("Das Programm konnte nicht gestartet werden:\n\n" + traceback.format_exc(limit=3))
         code = 1

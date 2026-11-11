@@ -76,6 +76,9 @@ class ActionButton(tk.Frame):
         else:
             self.sub_label.grid_remove()
             self.title_label.grid(row=0, column=self._col, rowspan=2, sticky=self._sticky)
+        # Text senkrecht mittig, falls der Button höher gezogen wird (z. B. neben "Speichern")
+        for r in (0, 1):
+            self.inner.grid_rowconfigure(r, weight=0 if with_subtitle else 1)
 
     def _colors(self):
         bg, hover, press, fg, sub = PALETTES[self.kind]

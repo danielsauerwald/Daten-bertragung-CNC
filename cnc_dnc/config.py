@@ -165,6 +165,9 @@ class AppConfig:
     # Bildschirmtastatur automatisch öffnen beim Antippen von Eingabefeldern / des Editors
     touch_keyboard: bool = True
     touch_keyboard_editor: bool = False
+    # zuletzt gewählte Satznummerierung
+    renumber_scheme: str = "tool"
+    renumber_step: int = 10
     geometry: str = ""
 
     path: str = field(default="", repr=False, compare=False)
@@ -216,6 +219,12 @@ class AppConfig:
         cfg.show_file_panel = bool(data.get("show_file_panel", True))
         cfg.touch_keyboard = bool(data.get("touch_keyboard", True))
         cfg.touch_keyboard_editor = bool(data.get("touch_keyboard_editor", False))
+        if data.get("renumber_scheme") in ("tool", "flat", "toolonly", "remove"):
+            cfg.renumber_scheme = data["renumber_scheme"]
+        try:
+            cfg.renumber_step = max(1, min(100, int(data.get("renumber_step", 10))))
+        except (TypeError, ValueError):
+            pass
         cfg.geometry = str(data.get("geometry", ""))
         return cfg
 
@@ -229,6 +238,8 @@ class AppConfig:
             "show_file_panel": self.show_file_panel,
             "touch_keyboard": self.touch_keyboard,
             "touch_keyboard_editor": self.touch_keyboard_editor,
+            "renumber_scheme": self.renumber_scheme,
+            "renumber_step": self.renumber_step,
             "geometry": self.geometry,
             "machines": [asdict(m) for m in self.machines],
         }
