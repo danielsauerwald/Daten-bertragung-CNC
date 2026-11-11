@@ -40,7 +40,7 @@ class ActionButton(tk.Frame):
         super().__init__(master, bg=bg, highlightthickness=1, highlightbackground=border,
                          highlightcolor=border, cursor="hand2")
         padx = px(self, 10 if compact else 14)
-        pady = px(self, 6 if compact else 10)
+        pady = px(self, 6 if compact else 8)
         self.inner = tk.Frame(self, bg=bg)
         self.inner.pack(fill="both", expand=True, padx=padx, pady=pady)
 

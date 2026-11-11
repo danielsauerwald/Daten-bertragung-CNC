@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.4
+# CNC-Datenübertragung 2.5
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -35,6 +35,8 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
 - **Kundenordner wird beim Speichern vorgeschlagen**, siehe [Kundenordner](#kundenordner).
 - **Zusammenrücken** auf Knopfdruck: Leerzeilen raus, vor jedem Werkzeug zwei Leerzeilen,
   siehe [Zusammenrücken](#zusammenrücken).
+- **Einrichteblatt als PDF**: Werkzeuge nach Seite 1 / Seite 2 mit dem Kommentar aus dem
+  Programm, dazu Spanndruck, Teil und Notizen, siehe [Einrichteblatt](#einrichteblatt).
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
 - **LEDs für die Steuerleitungen** CTS, DSR, CD und RI sowie TX/RX, wie im alten Programm.
 - **Warnung vor Sonderzeichen** (ä, ö, ü, Ø …), die viele Steuerungen mit Alarm ablehnen.
@@ -166,6 +168,38 @@ Die Taste **Zusammenrücken** (rechts unter „BEARBEITEN“) räumt das Program
 Zweimal Zusammenrücken ändert nichts mehr. Mit **↶ Rückgängig** über dem Editor holt man
 den alten Stand mit einem Tipp zurück. Gespeichert wird erst mit „Speichern“.
 
+## Einrichteblatt
+
+Die Taste **Einrichteblatt …** (rechts unter „BEARBEITEN“) erstellt ein Einrichteblatt als PDF,
+das auf eine A4-Seite passt. Man kann es ausdrucken, an die Maschine hängen oder einfach
+als Datei beim Programm lassen.
+
+![Einrichteblatt (Beispiel)](docs/einrichteblatt.png)
+
+**Automatisch aus dem Programm:**
+- **Werkzeuge je Seite:** Kanal 1 = Seite 1, Kanal 2 = Seite 2 (Sinumerik-Programme
+  `%_N_KANAL1_MPF` / `%_N_KANAL2_MPF`). Die **Bearbeitung** ist der Kommentar direkt über
+  dem Werkzeug: aus `;FERTIGDREHEN VCMT04` + `T02D1 …` wird „T2 – FERTIGDREHEN VCMT04“.
+  Werkzeuge aus anderen Unterprogrammen (z. B. ABSTECH, ANSCHLAGEN) stehen unter
+  „Weitere Programme“. Bei Programmen ohne Kanäle (z. B. Fanuc) gibt es eine Liste.
+  Eine Kommentarzeile wie `(SEITE 2)` schaltet ab dort auf Seite 2 um.
+- **Parameter:** Kommentierte Werte aus einem Parameter-Programm,
+  z. B. `R72=32 ;DURCHMESSER STANGE`.
+- **Kopf:** Programmname, Kunde (aus dem Kundenordner), Maschine, Datum.
+
+**Selbst eintragen** (wird neben dem Programm gespeichert und beim nächsten Mal wieder angezeigt):
+- je Werkzeug eine **Bemerkung**, die Bearbeitung lässt sich auch ändern (Zeile antippen)
+- Teil, Zeichnungs-Nr., Material, Rohteil, Stückzahl, eingerichtet von, Datum
+- **Spannmittel und Spanndruck** für Haupt- und Gegenspindel
+- Notizen
+
+Auf dem Blatt bleiben unter jeder Werkzeugliste zwei leere Zeilen und unten Notizlinien
+zum Nachtragen mit dem Stift.
+
+**Dateien:** Neben `METLOG_300069.txt` entstehen `METLOG_300069_Einrichteblatt.pdf` (wird in
+der Dateiliste angezeigt, Antippen öffnet sie im PDF-Programm) und
+`METLOG_300069.einrichteblatt.json` mit den eigenen Eingaben (in der Liste ausgeblendet).
+
 ## Warum sind die Zeilen früher verrutscht?
 
 Steuerungen beenden Zeilen unterschiedlich. Eine **Fanuc** gibt am Zeilenende standardmäßig
@@ -227,6 +261,11 @@ Unter **⚙ Maschinen** lässt sich das oben einstellen:
   und Blättern nicht ständig die Tastatur aufspringt)
 
 Die Taste ⌨ oben rechts öffnet bzw. schließt die Tastatur jederzeit von Hand.
+
+### Dateiliste ausblenden
+
+Der Knopf **◀** oben in der Dateiliste blendet sie aus, dann hat der Editor mehr Platz.
+**▶ Dateiliste** über dem Editor holt sie zurück.
 Mit dem Finger scrollt man im Editor auf der Spalte mit den Zeilennummern oder
 über die breiten Scrollbalken, in der Dateiliste direkt in der Liste.
 

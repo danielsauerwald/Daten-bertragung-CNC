@@ -823,3 +823,51 @@ class TextInputDialog(Dialog):
 
 def ask_text(parent, fonts: Fonts, title: str, message: str, initial: str = "") -> Optional[str]:
     return TextInputDialog(parent, fonts, title, message, initial).show()
+
+
+class FormDialog(Dialog):
+    """Kleines Formular mit mehreren Textfeldern, z. B. Bearbeitung + Bemerkung eines Werkzeugs."""
+
+    def __init__(self, parent, fonts: Fonts, title: str, fields: Sequence[Tuple[str, str, str]],
+                 message: str = "") -> None:
+        super().__init__(parent, fonts, title)
+        self.resizable(False, False)
+        bg = C["surface"]
+        body = tk.Frame(self, bg=bg, padx=px(self, 24), pady=px(self, 20))
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(1, weight=1)
+        tk.Label(body, text=title, bg=bg, fg=C["text"], font=fonts.title, anchor="w").grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        row = 1
+        if message:
+            tk.Label(body, text=message, bg=bg, fg=C["muted"], font=fonts.ui, anchor="w", justify="left",
+                     wraplength=px(self, 560)).grid(row=1, column=0, columnspan=3, sticky="w",
+                                                   pady=(px(self, 4), px(self, 6)))
+            row = 2
+        self.vars: Dict[str, tk.StringVar] = {}
+        first = None
+        for key, label, value in fields:
+            tk.Label(body, text=label, bg=bg, fg=C["text"], font=fonts.ui, anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(0, px(self, 14)), pady=px(self, 6))
+            var = tk.StringVar(value=value)
+            e = ttk.Entry(body, textvariable=var, font=fonts.title, width=34)
+            e.grid(row=row, column=1, sticky="ew", pady=px(self, 6))
+            if IS_WIN:
+                ttk.Button(body, text="⌨", style="Small.TButton", width=3, command=toggle_touch_keyboard).grid(
+                    row=row, column=2, padx=(px(self, 8), 0))
+            self.vars[key] = var
+            first = first or e
+            row += 1
+        bar = tk.Frame(self, bg=C["bg"])
+        bar.pack(fill="x")
+        ttk.Button(bar, text="Übernehmen", style="Primary.TButton", command=self.ok).pack(
+            side="right", padx=(0, px(self, 12)), pady=px(self, 14))
+        ttk.Button(bar, text="Abbrechen", command=self.cancel).pack(side="right", padx=(0, px(self, 12)))
+        self.bind("<Return>", lambda e: self.ok())
+        if first is not None:
+            first.focus_set()
+            first.icursor("end")
+
+    def ok(self) -> None:
+        self.result = {k: v.get().strip() for k, v in self.vars.items()}
+        self.destroy()

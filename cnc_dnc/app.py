@@ -15,7 +15,8 @@ from .config import AppConfig, MachineProfile
 from .files import count_files, is_inside, list_folder, rel_label, search, suggest_folder, walk_files
 from .serial_link import SerialError, SerialLink
 from .serial_link import serial as pyserial
-from .system import hide_touch_keyboard, show_touch_keyboard, toggle_touch_keyboard
+from .setupsheet import extract_parameters, extract_tools, load_sheet, sidecar_path
+from .system import hide_touch_keyboard, open_external, show_touch_keyboard, toggle_touch_keyboard
 from .textutil import (
     DIALECT_NAMES,
     ProgramInfo,
@@ -117,6 +118,7 @@ class App:
         self._build_statusbar()
         if not self.cfg.show_file_panel:
             self.file_panel.grid_remove()
+            self.show_files_btn.pack(side="left", padx=(0, px(r, 12)), before=self._info_left)
 
     def _build_header(self) -> None:
         r = self.root
@@ -176,6 +178,10 @@ class App:
         tk.Label(top, text="Programme", bg=C["bg"], fg=C["text"], font=f.heading).pack(side="left")
         ttk.Button(top, text="↻", style="Small.TButton", width=3,
                    command=lambda: self.refresh_files(rescan=True)).pack(side="right")
+        # Dateiliste ausblenden (wieder einblenden: "▶ Dateiliste" über dem Editor)
+        self.hide_files_btn = ttk.Button(top, text="◀", style="Small.TButton", width=3,
+                                         command=self.toggle_file_panel)
+        self.hide_files_btn.pack(side="right", padx=(0, px(r, 6)))
 
         self.folder_label = tk.Label(panel, text="", bg=C["bg"], fg=C["muted"], font=f.small, anchor="w",
                                      justify="left", wraplength=px(r, 310))
@@ -250,6 +256,8 @@ class App:
         self.cursor_label.pack(side="right")
         self.undo_btn = ttk.Button(info, text="↶ Rückgängig", style="Small.TButton", command=self.undo)
         self.undo_btn.pack(side="right", padx=(px(r, 10), px(r, 14)))
+        self.show_files_btn = ttk.Button(info, text="▶ Dateiliste", style="Small.TButton",
+                                         command=self.toggle_file_panel)
         left = tk.Frame(info, bg=C["bg"])
         left.pack(side="left", fill="x", expand=True)
         self._info_left = left
@@ -316,7 +324,7 @@ class App:
         add(self.send_btn)
         self.recv_btn = ActionButton(side, f, "Empfangen", subtitle="Maschine  →  PC", icon="◀", kind="success",
                                      big=True, command=self.receive)
-        add(self.recv_btn, gap=14)
+        add(self.recv_btn, gap=10)
 
         add(self._section(side, "DATEI"), gap=4)
         fr = row()
@@ -330,12 +338,15 @@ class App:
         add(self.save_btn)
         self.saveas_btn = ActionButton(side, f, "Speichern unter …", kind="neutral", compact=True,
                                        command=self.save_as)
-        add(self.saveas_btn, gap=14)
+        add(self.saveas_btn, gap=10)
 
         add(self._section(side, "BEARBEITEN"), gap=4)
-        self.compact_btn = ActionButton(side, f, "Zusammenrücken", subtitle="Leerzeilen raus · 2 vor Werkzeug",
-                                        kind="neutral", compact=True, command=self.compact)
-        add(self.compact_btn, gap=14)
+        self.compact_btn = ActionButton(side, f, "Zusammenrücken", kind="neutral", compact=True,
+                                        command=self.compact)
+        add(self.compact_btn)
+        self.setup_btn = ActionButton(side, f, "Einrichteblatt …", kind="neutral", compact=True,
+                                      command=self.setup_sheet)
+        add(self.setup_btn, gap=10)
 
         add(self._section(side, "ANSICHT"), gap=4)
         fr = row()
@@ -346,12 +357,10 @@ class App:
         self.zoom_in_btn = ActionButton(fr, f, "A+", kind="neutral", compact=True, anchor="center",
                                         command=lambda: self.zoom(1))
         place_row(fr, [self.find_btn, self.zoom_out_btn, self.zoom_in_btn], weights=(2, 1, 1))
-        self.panel_btn = ActionButton(side, f, "Dateiliste ein/aus", kind="neutral", compact=True,
-                                      anchor="center", command=self.toggle_file_panel)
-        add(self.panel_btn, gap=0)
 
     def _section(self, parent, text: str) -> tk.Label:
-        return tk.Label(parent, text=text, bg=C["bg"], fg=C["faint"], font=self.fonts.small_bold, anchor="w")
+        return tk.Label(parent, text=text, bg=C["bg"], fg=C["faint"], font=self.fonts.small_bold, anchor="w",
+                        pady=0)
 
     def _build_statusbar(self) -> None:
         r = self.root
@@ -644,7 +653,7 @@ class App:
 
     def _set_busy(self, busy: bool) -> None:
         for b in (self.send_btn, self.recv_btn, self.open_btn, self.save_btn, self.saveas_btn, self.new_btn,
-                  self.compact_btn, self.machine_btn, self.machines_btn, self.connect_btn):
+                  self.compact_btn, self.setup_btn, self.machine_btn, self.machines_btn, self.connect_btn):
             b.set_enabled(not busy)
         self.undo_btn.state(["disabled"] if busy else ["!disabled"])
         self.editor.set_readonly(busy)
@@ -953,6 +962,12 @@ class App:
     def open_file(self, path: Optional[str] = None) -> None:
         if self.busy:
             return
+        if path is not None and path.lower().endswith(".pdf"):
+            # z. B. Einrichteblatt: mit dem PDF-Programm öffnen, nicht in den Editor laden
+            if not open_external(path):
+                dialogs.info(self.root, self.fonts, "PDF öffnen", "Die PDF konnte nicht geöffnet werden.",
+                             detail=path)
+            return
         if path is not None and self.current_path and os.path.abspath(path) == os.path.abspath(self.current_path):
             return
         if not self._confirm_discard():
@@ -975,6 +990,9 @@ class App:
         self.origin = "file"
         self.dirty = False
         self._reanalyze()
+        # Liste zeigt den Ordner der geöffneten Datei (z. B. nach der Suche)
+        if is_inside(self.machine.program_folder(), path):
+            self.browse_dir = os.path.dirname(os.path.abspath(path))
         self.refresh_files()
         self.set_status("Geöffnet: {}  ({} Zeilen)".format(os.path.basename(path), fmt_int(count_lines(text))))
 
@@ -1043,12 +1061,14 @@ class App:
         return self._write(path)
 
     def _write(self, path: str) -> bool:
+        old_path = self.current_path
         try:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             save_program_file(path, self.editor.get_text())
         except OSError as exc:
             dialogs.error(self.root, self.fonts, "Speichern fehlgeschlagen", str(exc))
             return False
+        self._copy_sidecar(old_path, path)
         self.current_path = os.path.normpath(path)
         self.origin = "file"
         self.dirty = False
@@ -1094,6 +1114,54 @@ class App:
         if self._analyze_job is not None:
             self.root.after_cancel(self._analyze_job)
         self._analyze_job = self.root.after(700, self._reanalyze)
+
+    def _copy_sidecar(self, old_path: Optional[str], new_path: str) -> None:
+        """Bei „Speichern unter“ das Einrichteblatt (eigene Eingaben) mitnehmen."""
+        if not old_path or os.path.normcase(os.path.abspath(old_path)) == os.path.normcase(os.path.abspath(new_path)):
+            return
+        src, dst = sidecar_path(old_path), sidecar_path(new_path)
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                import shutil
+
+                shutil.copyfile(src, dst)
+            except OSError:
+                pass
+
+    def setup_sheet(self) -> None:
+        """Einrichteblatt: Werkzeuge je Seite aus dem Programm, eigene Einträge, PDF."""
+        if self.busy:
+            return
+        text = self.editor.get_text()
+        if not text.strip():
+            dialogs.info(self.root, self.fonts, "Kein Programm", "Bitte zuerst ein Programm öffnen oder empfangen.")
+            return
+        if not self.current_path:
+            if not dialogs.confirm(self.root, self.fonts, "Programm zuerst speichern",
+                                   "Das Einrichteblatt wird neben dem Programm gespeichert. Programm jetzt speichern?",
+                                   yes="Speichern"):
+                return
+            if not self.save():
+                return
+        from .setup_dialog import SetupSheetDialog
+        from .setupsheet_pdf import SheetContext
+
+        path = self.current_path
+        root = self.machine.program_folder()
+        customer = ""
+        if is_inside(root, path):
+            customer = rel_label(root, os.path.dirname(os.path.abspath(path))).split(" › ")[0]
+        name = analyze_program(text).name or os.path.splitext(os.path.basename(path))[0]
+        ctx = SheetContext(program=name, machine=self.machine.display_name, customer=customer,
+                           file_name=os.path.basename(path))
+        res = SetupSheetDialog(self.root, self.fonts, ctx, path, extract_tools(text), extract_parameters(text),
+                               load_sheet(path)).show()
+        if res:
+            self.refresh_files(rescan=True)
+            if res == "saved":
+                self.set_status("✓  Einrichteblatt gespeichert.", "ok")
+            else:
+                self.set_status("✓  Einrichteblatt erstellt: " + res, "ok")
 
     def compact(self) -> None:
         """Leerzeilen entfernen, vor jedem Werkzeugaufruf zwei Leerzeilen (rückgängig machbar)."""
@@ -1236,9 +1304,11 @@ class App:
         if self.file_panel.winfo_manager():
             self.file_panel.grid_remove()
             self.cfg.show_file_panel = False
+            self.show_files_btn.pack(side="left", padx=(0, px(self.root, 12)), before=self._info_left)
         else:
             self.file_panel.grid()
             self.cfg.show_file_panel = True
+            self.show_files_btn.pack_forget()
             self.refresh_files()
         self._save_config()
 

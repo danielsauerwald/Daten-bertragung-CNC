@@ -268,15 +268,20 @@ def test_save_suggests_customer_folder(app, tmp_path, monkeypatch):
 
 
 def test_all_buttons_visible_on_tablet_screen(app):
-    """1366x768 minus Taskleiste und Titelleiste – nichts darf abgeschnitten sein."""
-    app.root.geometry("1366x698+0+0")
+    """1366x768 minus Taskleiste, Titelleiste und Rand – nichts darf abgeschnitten sein.
+
+    660 Pixel sind am Foto vom echten Toughbook abgeglichen (dort fehlten in 2.1 die
+    Tasten, die hier bei 660 Pixel Höhe ebenfalls nicht mehr hineinpassen).
+    """
+    app.root.geometry("1366x660+0+0")
     for _ in range(5):
         app.root.update()
         time.sleep(0.05)
     bottom = app.root.winfo_rooty() + app.root.winfo_height()
     right = app.root.winfo_rootx() + app.root.winfo_width()
-    for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "compact_btn", "find_btn",
-                 "zoom_out_btn", "zoom_in_btn", "panel_btn", "machines_btn", "connect_btn", "machine_btn"):
+    for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "compact_btn", "setup_btn",
+                 "find_btn", "zoom_out_btn", "zoom_in_btn", "machines_btn", "connect_btn", "machine_btn",
+                 "hide_files_btn", "undo_btn"):
         w = getattr(app, name)
         assert w.winfo_ismapped(), name
         assert w.winfo_rooty() + w.winfo_height() <= bottom - 50, name  # Statuszeile darunter
@@ -344,3 +349,63 @@ def test_compact_button_and_undo(app):
     app.compact()
     app.compact()
     assert "schon zusammengerückt" in app.status_text.cget("text")
+
+
+def test_file_list_can_be_hidden_and_shown_again(app):
+    app.root.update()
+    app.toggle_file_panel()
+    app.root.update()
+    assert not app.file_panel.winfo_ismapped() and app.show_files_btn.winfo_ismapped()
+    app.toggle_file_panel()
+    app.root.update()
+    assert app.file_panel.winfo_ismapped() and not app.show_files_btn.winfo_ismapped()
+
+
+def test_setup_sheet_flow(app, tmp_path, monkeypatch):
+    import cnc_dnc.app as app_mod
+    import cnc_dnc.setup_dialog as sd_mod
+    from cnc_dnc.setup_dialog import SetupSheetDialog
+
+    root = str(tmp_path / "Emco-2")
+    os.makedirs(os.path.join(root, "Metlog"))
+    app.machine.folder = root
+    app.apply_machine(connect=False)
+    src = os.path.join(os.path.dirname(__file__), "data", "METLOG_300069.txt")
+    prog = os.path.join(root, "Metlog", "METLOG_300069.txt")
+    with open(src, "rb") as a, open(prog, "wb") as b:
+        b.write(a.read())
+    app.open_file(prog)
+    opened = []
+    monkeypatch.setattr(sd_mod, "open_external", lambda p: opened.append(p) or True)
+
+    def fake_show(self):
+        assert self.ctx.program == "METLOG_300069" and self.ctx.customer == "Metlog"
+        seiten = [t.heading("desc", "text") for t in self.trees]
+        assert len(seiten) == 3  # Seite 1, Seite 2, weitere Programme
+        first = self.trees[0].get_children()[0]
+        assert self.trees[0].item(first, "values")[:2] == ("T1", "VORDREHEN VNMG08")
+        self.data.set_tool(self._rows[str(self.trees[0]) + first], "VORDREHEN VNMG08", "Platte neu")
+        self.field_vars["hsp_druck"].set("25")
+        self.notes.insert("1.0", "Erstes Teil messen")
+        self.make_pdf()
+        return self.result
+
+    monkeypatch.setattr(SetupSheetDialog, "show", fake_show)
+    app.setup_sheet()
+    pdf = os.path.join(root, "Metlog", "METLOG_300069_Einrichteblatt.pdf")
+    assert opened == [pdf] and os.path.exists(pdf)
+    assert os.path.exists(os.path.join(root, "Metlog", "METLOG_300069.einrichteblatt.json"))
+    # Liste zeigt das PDF, aber nicht die Begleitdatei
+    names = [app.file_tree.item(i, "text") for i in app.file_tree.get_children()]
+    assert "METLOG_300069_Einrichteblatt.pdf" in names
+    assert not any(n.endswith(".json") for n in names)
+    # PDF in der Liste antippen -> PDF-Programm, nicht der Editor
+    ext = []
+    monkeypatch.setattr(app_mod, "open_external", lambda p: ext.append(p) or True)
+    app.open_file(pdf)
+    assert ext == [pdf] and app.current_path == prog
+    # Eingaben bleiben gespeichert
+    from cnc_dnc.setupsheet import load_sheet
+
+    data = load_sheet(prog)
+    assert data.fields["hsp_druck"] == "25" and data.notes == "Erstes Teil messen"

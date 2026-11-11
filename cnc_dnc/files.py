@@ -21,7 +21,9 @@ class Hit(NamedTuple):
 
 
 def _visible(name: str) -> bool:
-    return not name.startswith((".", "~$")) and name.lower() not in ("thumbs.db", "desktop.ini")
+    low = name.lower()
+    return (not name.startswith((".", "~$")) and low not in ("thumbs.db", "desktop.ini")
+            and not low.endswith((".einrichteblatt.json", ".tmp")))
 
 
 def list_folder(path: str) -> Tuple[List[Entry], List[Entry]]:

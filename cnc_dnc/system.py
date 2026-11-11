@@ -92,3 +92,17 @@ def toggle_touch_keyboard() -> bool:
         return True
     _state["last_show"] = 0.0
     return show_touch_keyboard()
+
+
+def open_external(path: str) -> bool:
+    """Datei mit dem zugehörigen Programm öffnen (z. B. PDF-Anzeige)."""
+    try:
+        if IS_WIN:
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            import subprocess
+
+            subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (OSError, ValueError):
+        return False
