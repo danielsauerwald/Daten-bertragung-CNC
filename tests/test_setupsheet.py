@@ -155,3 +155,13 @@ def test_correction_sheet_pdf(tmp_path):
     for needle in (b"(KORREKTURBLATT)", b"(SEITE 1)", b"(SEITE 2)", b"(T12)", b"(T11)", b"(X -0,02)",
                    b"(Bemerkung)"):
         assert needle in content, needle
+
+
+
+def test_tool_description_across_setup_lines():
+    text = ("%_N_KANAL2_MPF\n;EINSTECHEN\nT06D1 G95\nG00 X100 Z100\nM5\n;FRAESEN 5MM\nM5\n\n"
+            "T07D1 G94 G18 S3=3500 M3=3\nG00 X18 Z-9.5\nM17\n")
+    assert [(t.tool, t.description) for t in extract_tools(text)] == [("T6", "EINSTECHEN"), ("T7", "FRAESEN 5MM")]
+    # eine Bewegung dazwischen -> Kommentar gehört nicht mehr dazu
+    text2 = text.replace(";FRAESEN 5MM\nM5\n", ";FRAESEN 5MM\nG0 X50\n")
+    assert [t.description for t in extract_tools(text2)] == ["EINSTECHEN", ""]

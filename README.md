@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.7
+# CNC-Datenübertragung 2.7.1
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -164,7 +164,18 @@ Die Taste **Zusammenrücken** (rechts unter „BEARBEITEN“) räumt das Program
   zählen z. B. `T12D1`, `N30 T01 M06`, `T="BOHRER"` und `TOOL CALL`, nicht aber ein
   Kommentar wie `(WERKZEUG T01)`.
 - **Kommentarzeilen direkt über dem Werkzeug** (z. B. `;FERTIGDREHEN VCMT04`) bleiben
-  beim Werkzeug. Die Leerzeile kommt über den Kommentar.
+  beim Werkzeug. Die Leerzeile kommt über den Kommentar. Das gilt auch, wenn zwischen
+  Kommentar und Werkzeug noch bis zu drei Sätze ohne Achsbewegung stehen (z. B. `M5`,
+  `G04 F0.2`, `STOPRE`):
+  ```
+  G00 X100 Z100
+  M5
+
+  ;FRAESEN 5MM
+  M5
+  T07D1 G94 G18 S3=3500 M3=3
+  ```
+  Auf Einricht- und Korrekturblatt bekommt T7 dann auch die Bezeichnung „FRAESEN 5MM“.
 - **Direkt nach einem Programmkopf** (`%_N_…_MPF`, `;$PATH=…`, `O1234`) kommt kein Abstand.
 - **Mehrere Programme in einer Datei** (Sinumerik-Werkstück) bleiben durch zwei
   Leerzeilen vor jedem weiteren `%_N_…`-Kopf getrennt.

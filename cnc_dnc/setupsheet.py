@@ -20,7 +20,9 @@ from .textutil import (
     _HEID_HEAD,
     _SIN_HEAD,
     _SIN_PATH,
+    MAX_SETUP_LINES,
     _is_comment_only,
+    is_setup_line,
     is_tool_call,
 )
 
@@ -128,6 +130,7 @@ def extract_tools(text: str) -> List[ToolUse]:
     program_side: Optional[int] = None
     marker_side: Optional[int] = None
     pending_comment = ""
+    setup_lines = 0  # Sätze ohne Achsbewegung seit dem Kommentar (M5, G04 …)
     for no, raw in enumerate(text.split("\n"), start=1):
         s = raw.strip()
         if not s:
@@ -148,6 +151,7 @@ def extract_tools(text: str) -> List[ToolUse]:
                 marker_side = int(m.group(1) or m.group(2))
             if _meaningful_comment(s):
                 pending_comment = _clean_comment(s)
+                setup_lines = 0
             continue
         if is_tool_call(s):
             desc = pending_comment or _inline_comment(s)
@@ -157,6 +161,9 @@ def extract_tools(text: str) -> List[ToolUse]:
             if not desc and side == 0:
                 desc = program
             result.append(ToolUse(side, format_tool(s), desc, program, no))
+        elif pending_comment and setup_lines < MAX_SETUP_LINES and is_setup_line(s):
+            setup_lines += 1  # z. B. M5 zwischen ";FRAESEN 5MM" und dem Werkzeug
+            continue
         pending_comment = ""
     return _dedupe(result)
 

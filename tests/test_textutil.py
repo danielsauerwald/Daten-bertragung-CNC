@@ -234,7 +234,9 @@ def test_compact_fanuc():
     text = ("%\n\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\n\n\nN20 G54\nN30 T01 M06\n"
             "N40 S2400 M03\n\n(BOHRER)\n\nN100 T05 M06\nN110 M30\n\n%\n")
     out = compact_program(text).text
-    assert out == ("%\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\nN20 G54\n\nN30 T01 M06\n"
+    # T01: Kommentar + Grundeinstellungen (G21 G90, G54) gehören zum ersten Werkzeug,
+    # direkt hinter dem Programmkopf kommt aber keine Leerzeile
+    assert out == ("%\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\nN20 G54\nN30 T01 M06\n"
                    "N40 S2400 M03\n\n(BOHRER)\nN100 T05 M06\nN110 M30\n%\n")
 
 
@@ -243,3 +245,48 @@ def test_compact_heidenhain_only_removes_blank_lines():
     r = compact_program(text, dialect="heidenhain")
     assert r.text == "0 BEGIN PGM P MM\n1 TOOL CALL 1 Z S100\n2 L X0\n3 TOOL CALL 2 Z\n4 END PGM P MM\n"
     assert r.tool_gaps == 0 and r.removed == 2
+
+
+# Kommentar gehört zum Werkzeug, auch wenn noch M5 o. Ä. dazwischen steht (BOESE_30155)
+BOESE = """%_N_KANAL2_MPF
+;$PATH=/_N_WKS_DIR/_N_BOESE_30155_WPD
+;EINSTECHEN
+T06D1 G95 G18 S2000 M3 M8
+G01 X18 F0.2
+G00 X100 Z100
+M5
+;FRAESEN 5MM
+M5
+
+T07D1 G94 G18 S3=3500 M3=3
+G00 X18 Z-9.5 M3=3
+M17
+"""
+
+
+def test_compact_comment_across_setup_lines():
+    out = compact_program(BOESE).text
+    assert "G00 X100 Z100\nM5\n\n;FRAESEN 5MM\nM5\nT07D1 G94 G18 S3=3500 M3=3\n" in out
+    assert compact_program(out).text == out
+
+
+def test_compact_no_comment_keeps_gap_before_tool():
+    out = compact_program("O1\nT1 M6\nG0 X0\nG0 X100\nM5\nM9\nT2 M6\nG0 X1\n").text
+    assert out == "O1\nT1 M6\nG0 X0\nG0 X100\nM5\nM9\n\nT2 M6\nG0 X1\n"
+
+
+def test_commented_out_code_is_not_pulled_to_the_tool():
+    out = compact_program("O1\nT1 M6\nG0 X0\n;M00\nM5\nT2 M6\n").text
+    assert out == "O1\nT1 M6\nG0 X0\n;M00\nM5\n\nT2 M6\n"
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("M5", True), ("M9", True), ("G04 F0.2", True), ("STOPRE", True), ("G94 G18", True),
+    ("S3=3500 M3=3", True), ("SPOS=0", True),
+    ("G00 X100 Z100", False), ("G01 Z-3.5 F0.2", False), ("T07D1", False), (";FRAESEN", False),
+    ("C=0", False),
+])
+def test_is_setup_line(line, expected):
+    from cnc_dnc.textutil import is_setup_line
+
+    assert is_setup_line(line) is expected

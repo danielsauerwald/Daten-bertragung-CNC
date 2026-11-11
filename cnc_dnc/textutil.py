@@ -418,6 +418,63 @@ def is_tool_call(line: str) -> bool:
     return bool(_TOOL_CALL.search(_CODE_ONLY.sub("", line)))
 
 
+# Satz mit Achsbewegung/-position (X10, Z-3.5, C=…)
+_AXIS_WORD = re.compile(r"(?<![A-Za-z_$])[XYZUVWABC]\d?\s*(?:=|[-+]?[\d.])", re.IGNORECASE)
+_CODE_LIKE_COMMENT = re.compile(r"^[A-Z]{1,2}\d", re.IGNORECASE)
+MAX_SETUP_LINES = 3
+
+
+def is_setup_line(s: str) -> bool:
+    """Satz ohne Achsbewegung, z. B. ``M5``, ``M9``, ``G04 F0.2``, ``STOPRE``, ``G18``.
+
+    Solche Sätze dürfen zwischen dem Arbeitsgang-Kommentar (``;FRAESEN 5MM``) und dem
+    Werkzeugaufruf stehen – der Kommentar gehört trotzdem zum Werkzeug.
+    """
+    s = s.strip()
+    if not s or _is_comment_only(s) or _is_path_line(s) or _is_program_header(s):
+        return False
+    code = _CODE_ONLY.sub("", s).strip()
+    return bool(code) and not is_tool_call(code) and not _AXIS_WORD.search(code)
+
+
+def is_operation_comment(s: str) -> bool:
+    """Kommentarzeile mit Text wie ``;FRAESEN 5MM`` (nicht ``;M22`` = auskommentierter Code)."""
+    s = s.strip()
+    if not _is_comment_only(s) or _is_path_line(s):
+        return False
+    body = s[1:-1] if s.startswith("(") else s[1:]
+    body = body.strip()
+    return bool(re.search(r"[A-Za-zÄÖÜäöü]", body)) and not _CODE_LIKE_COMMENT.match(body)
+
+
+def tool_block_start(lines: List[str], tool_index: int) -> int:
+    """Wo beginnt der Abschnitt eines Werkzeugs? (Index der ersten zugehörigen Zeile)
+
+    Kommentarzeilen direkt über dem Werkzeug gehören dazu. Stehen zwischen Kommentar
+    und Werkzeug nur bis zu 3 Sätze ohne Achsbewegung (M5, G04 …), gehören diese
+    Sätze und der Kommentar ebenfalls dazu.
+    """
+    def comment(i: int) -> bool:
+        s = lines[i].strip()
+        return bool(s) and _is_comment_only(s) and not _is_path_line(s)
+
+    pos = tool_index
+    while pos > 0 and comment(pos - 1):
+        pos -= 1
+    if pos < tool_index:
+        return pos  # Kommentar direkt darüber
+    k, setup = tool_index, 0
+    while k > 0 and setup < MAX_SETUP_LINES and is_setup_line(lines[k - 1]):
+        k -= 1
+        setup += 1
+    c = k
+    while c > 0 and comment(c - 1):
+        c -= 1
+    if c < k and any(is_operation_comment(lines[i]) for i in range(c, k)):
+        return c
+    return tool_index
+
+
 class CompactResult:
     def __init__(self, text: str, removed: int, tool_gaps: int, program_gaps: int, tools: int) -> None:
         self.text = text
@@ -455,6 +512,7 @@ def compact_program(text: str, tool_blank_lines: int = 1, program_blank_lines: i
     tools = 0
     has_content = False   # schon richtiger Programminhalt da (nicht nur "%")?
     header_zone = True    # direkt nach Programmanfang/-kopf: kein Abstand
+    header_end = 0        # Zeilen bis hier gehören zum Programmkopf (%, %_N_…, O1234, ;$PATH)
 
     def insert_gap(position: int, kind: str) -> None:
         n = tool_blank_lines if kind == "tool" else program_blank_lines
@@ -469,6 +527,8 @@ def compact_program(text: str, tool_blank_lines: int = 1, program_blank_lines: i
             continue
         if s == "%":
             out.append(ln)
+            if header_zone:
+                header_end = len(out)
             continue
         if _is_program_header(s):
             if has_content:
@@ -476,20 +536,21 @@ def compact_program(text: str, tool_blank_lines: int = 1, program_blank_lines: i
             out.append(ln)
             has_content = True
             header_zone = True
+            header_end = len(out)
             continue
         if _is_path_line(s):
             out.append(ln)
             has_content = True
+            if header_zone:
+                header_end = len(out)
             continue
         if is_tool_call(s):
             tools += 1
             if not header_zone and has_content:
-                # Kommentarzeilen direkt darüber gehören zum Werkzeug
-                pos = len(out)
-                while pos > 0 and out[pos - 1].strip() and _is_comment_only(out[pos - 1].strip()) \
-                        and not _is_path_line(out[pos - 1].strip()):
-                    pos -= 1
-                insert_gap(pos, "tool")
+                # Kommentar darüber (ggf. über M5/G04 … hinweg) gehört zum Werkzeug
+                pos = tool_block_start(out + [ln], len(out))
+                if pos > header_end:  # nie direkt hinter den Programmkopf
+                    insert_gap(pos, "tool")
             out.append(ln)
             has_content = True
             header_zone = False
