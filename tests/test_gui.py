@@ -280,6 +280,7 @@ def test_all_buttons_visible_on_tablet_screen(app):
     bottom = app.root.winfo_rooty() + app.root.winfo_height()
     right = app.root.winfo_rootx() + app.root.winfo_width()
     for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "compact_btn", "number_btn", "setup_btn",
+                 "kontur_btn",
                  "find_btn", "zoom_out_btn", "zoom_in_btn", "machines_btn", "connect_btn", "machine_btn",
                  "hide_files_btn", "undo_btn"):
         w = getattr(app, name)
@@ -531,3 +532,141 @@ def test_correction_sheet_orientation_is_remembered(app, tmp_path, monkeypatch):
     pdf = tmp_path / "TEIL_Korrekturblatt.pdf"
     assert b"/MediaBox [0 0 841.89 595.28]" in pdf.read_bytes()  # quer
     assert app.cfg.korr_landscape is True                         # gemerkt
+
+
+# --------------------------------------------------------------------------
+# Kontur-Assistent
+# --------------------------------------------------------------------------
+
+
+def _kontur_click(dlg, z, r):
+    """In der Zeichnung auf die Stelle (z, r) tippen."""
+    from types import SimpleNamespace
+
+    x, y = dlg._P(z, r)
+    dlg._click(SimpleNamespace(x=int(round(x)), y=int(round(y))))
+
+
+def test_kontur_dialog_new_program_flow(app, monkeypatch):
+    from cnc_dnc.kontur import Fraesung, neues_teil
+    from cnc_dnc.kontur_dialog import KonturDialog
+
+    seen = {}
+
+    def fake_show(self):
+        self.deiconify()
+        self.update()
+        # erstes Öffnen: Beispielteil, damit man sieht wie es geht
+        seen["start"] = self.teil.name
+        self._replace_part(neues_teil(), keep_tools=True)
+        self.fvars["name"].set("Welle 7")
+        self.fvars["rohteil_d"].set("36")
+        self.fvars["planaufmass"].set("0,5")  # Komma geht auch
+        self.append_step(20, 15)
+        self.append_step(30, 10)
+        self.set_corner(1, "fase", 1.0)
+        self.refresh()
+        self.update()
+        assert self.res.ok, self.res.errors
+        # Zylinder Ø20 antippen -> Element 2, Auswahlleiste mit Drehen/Fräsen
+        _kontur_click(self, -8, 10)
+        seen["sel"] = self.sel
+        seen["buttons"] = [w.cget("text") for w in self.sel_buttons.winfo_children() if w.winfo_class() == "TButton"]
+        # Ecke 3 (Absatz Ø20 -> Ø30) antippen und entgraten
+        _kontur_click(self, -15, 15)
+        seen["corner"] = self.sel
+        self.set_corner(3, "entgraten")
+        # Fläche auf Ø20 bei 0° und 180° (6 mm Abstand zum Absatz, Fasenfräser Ø10 passt)
+        self.teil.fraesungen.append(Fraesung("flaeche", [0, 180], 0, -9, 17, 0, 0, 5, True, 7, 0.3))
+        self.refresh()
+        self.update()
+        _kontur_click(self, -4.5, 9)
+        seen["feat"] = self.sel
+        seen["msg"] = self.msg.cget("text")
+        self.nb.select(4)
+        self.update()
+        seen["code_tab"] = self.code_text.get("1.0", "3.0")
+        assert self.res.ok, self.res.errors  # sonst öffnet finish() eine Meldung und der Test hängt
+        self.finish("neu")
+        return self.result
+
+    monkeypatch.setattr(KonturDialog, "show", fake_show)
+    app.kontur()
+    assert seen["start"] == "BEISPIEL"
+    assert seen["sel"] == ("seg", 2)
+    assert seen["buttons"][:2] == ["Drehen", "Nicht drehen"] and "Fläche" in seen["buttons"]
+    assert seen["corner"] == ("corner", 3)
+    assert seen["feat"] == ("feat", 0)
+    assert seen["msg"].startswith("✓")
+    assert seen["code_tab"].startswith("%_N_WELLE_7_MPF")
+    text = app.editor.get_text()
+    assert text.startswith("%_N_WELLE_7_MPF\n") and text.rstrip().endswith("M30")
+    assert "T01D1 G95 G18" in text and "SPOS=DC(180)" in text and ";ENTGRATEN FLAECHE SW17" in text
+    assert app.dirty and app.current_path is None
+    assert "Kontur" in app.status_text.cget("text")
+    # Eingaben bleiben für das nächste Mal gespeichert
+    from cnc_dnc.kontur import load_teil
+
+    again = load_teil(app._kontur_path())
+    assert again.name == "Welle 7" and again.rohteil_d == 36 and again.planaufmass == 0.5
+    assert [(p.x, p.z) for p in again.punkte] == [(0, 0), (20, 0), (20, -15), (30, -15), (30, -25)]
+    assert again.punkte[3].ecke == "entgraten" and len(again.fraesungen) == 1
+
+
+def test_kontur_insert_at_cursor_and_errors(app, monkeypatch):
+    from cnc_dnc.kontur import KPunkt
+    from cnc_dnc.kontur_dialog import KonturDialog
+
+    app.editor.set_text("%_N_KANAL1_MPF\nG54\nM17\n")
+    app.editor.text.mark_set("insert", "2.1")
+    seen = {}
+
+    def fake_show(self):
+        self.update()
+        # Einstich -> Fehler, Tasten gesperrt
+        self.teil.punkte.insert(3, KPunkt(14, -15))
+        self.refresh()
+        seen["err"] = self.msg.cget("text")
+        seen["disabled"] = self.new_btn.instate(["disabled"])
+        del self.teil.punkte[3]
+        self.refresh()
+        seen["enabled"] = not self.new_btn.instate(["disabled"])
+        assert self.res.ok, self.res.errors
+        self.finish("einfuegen")
+        return self.result
+
+    monkeypatch.setattr(KonturDialog, "show", fake_show)
+    app.kontur()
+    assert seen["err"].startswith("✕") and "Einstiche" in seen["err"] and seen["disabled"]
+    assert seen["enabled"]
+    lines = app.editor.get_text().split("\n")
+    assert lines[:3] == ["%_N_KANAL1_MPF", "G54", ";KONTUR-ASSISTENT  TEIL BEISPIEL"]
+    assert "M17" in lines and "M30" not in lines and app.dirty
+    app.undo()
+    app.root.update()
+    assert app.editor.get_text() == "%_N_KANAL1_MPF\nG54\nM17\n"
+
+
+def test_kontur_feature_dialog_parses_input(app):
+    from cnc_dnc.kontur import Fraesung, beispiel_teil
+    from cnc_dnc.kontur_dialog import FeatureDialog
+
+    teil = beispiel_teil()
+    dlg = FeatureDialog(app.root, app.fonts, teil, Fraesung("nut", [0], -16, -28, 10, 2, 0, 5), "Nut")
+    dlg.vars["mass"].set("8,5")
+    dlg.vars["winkel"].set("30")
+    dlg._spread(3)
+    assert dlg.vars["winkel"].get() == "30 150 270"
+    # nur passende Werkzeuge (Fräser, radial) stehen zur Wahl
+    assert dlg.vars["wz"].get() == "T5 FRAESER D8"
+    dlg.deburr.set(True)
+    dlg._toggle()
+    dlg.ok()
+    fr = dlg.result
+    assert fr.mass == 8.5 and fr.winkel == [30, 150, 270] and fr.entgraten and fr.wz_entgraten == 7
+    # Eingabefehler: Fenster bleibt offen und sagt warum
+    dlg2 = FeatureDialog(app.root, app.fonts, teil, Fraesung("flaeche"), "Fläche")
+    dlg2.vars["mass"].set("abc")
+    dlg2.ok()
+    assert dlg2.result is None and "Zahlen" in dlg2.msg.cget("text")
+    dlg2.destroy()

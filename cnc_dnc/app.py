@@ -351,9 +351,12 @@ class App:
         add(self.number_btn)
         self.setup_btn = ActionButton(side, f, "Einricht-/Korrekturblatt", kind="neutral", compact=True,
                                       command=self.setup_sheet)
-        add(self.setup_btn, gap=10)
+        add(self.setup_btn)
+        self.kontur_btn = ActionButton(side, f, "Kontur → Code …", kind="neutral", compact=True,
+                                       command=self.kontur)
+        add(self.kontur_btn, gap=12)
 
-        add(self._section(side, "ANSICHT"), gap=4)
+        # Suchen / Schrift: ohne eigene Überschrift, sonst passt die Spalte nicht mehr auf 1366x768
         fr = row()
         self.find_btn = ActionButton(fr, f, "Suchen", kind="neutral", compact=True, anchor="center",
                                      command=lambda: self.toggle_find())
@@ -1171,6 +1174,50 @@ class App:
                 self.set_status("✓  Einrichteblatt gespeichert.", "ok")
             else:
                 self.set_status("✓  PDF erstellt: " + res, "ok")
+
+    def _kontur_path(self) -> str:
+        from .config import config_dir
+
+        base = os.path.dirname(self.cfg.path) if self.cfg.path else config_dir()
+        return os.path.join(base, "kontur.json")
+
+    def kontur(self) -> None:
+        """Kontur-Assistent: Teil eingeben, Elemente antippen, Sinumerik-Code erzeugen."""
+        if self.busy:
+            return
+        from .kontur import load_teil, save_teil
+        from .kontur_dialog import KonturDialog
+
+        teil = load_teil(self._kontur_path())
+        res = KonturDialog(self.root, self.fonts, teil, control=self.machine.control).show()
+        try:
+            save_teil(teil, self._kontur_path())  # Eingaben fürs nächste Mal merken
+        except OSError:
+            pass
+        if not res:
+            return
+        mode, code = res
+        if mode == "neu":
+            if not self._confirm_discard():
+                return
+            self.editor.set_text(code)
+            self.current_path = None
+            self.origin = "new"
+            self.dirty = True
+            self._reanalyze()
+            self._update_title()
+            self.refresh_files()
+            self.set_status("✓  Programm aus der Kontur erzeugt. Bitte vor dem ersten Lauf simulieren, "
+                            "dann speichern und senden.", "ok")
+        else:
+            text = self.editor.text
+            if text.index("insert lineend") != text.index("insert linestart"):
+                text.mark_set("insert", "insert lineend")
+                code = "\n" + code
+            text.insert("insert", code)
+            self.editor.schedule_refresh()
+            self._on_editor_change()
+            self.set_status("✓  Arbeitsgänge aus der Kontur eingefügt.  Zurück mit „↶ Rückgängig“.", "ok")
 
     def renumber(self) -> None:
         """Satznummern setzen/entfernen – Schema im Fenster wählbar, rückgängig machbar."""

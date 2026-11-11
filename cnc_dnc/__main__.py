@@ -105,6 +105,12 @@ def main(argv=None) -> int:
         from .numbering_dialog import RenumberDialog  # noqa: F401
 
         assert "N1030 G70 P1010 Q1020" in renumber("O1\nN5 T1\nN6 G0\nN7 G1\nN8 G70 P6 Q7\n", "tool").text
+        # Kontur-Assistent: Modul vorhanden und Code-Erzeugung (Drehen + Fräsen auf Winkellagen) klappt
+        from .kontur import beispiel_teil, generate
+        from .kontur_dialog import KonturDialog  # noqa: F401
+
+        kres = generate(beispiel_teil(), rahmen=True)
+        assert kres.ok and "SPOS=DC(180)" in kres.code and "G42 G01 Z0" in kres.code
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)

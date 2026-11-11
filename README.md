@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.8
+# CNC-Datenübertragung 2.9
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -41,6 +41,9 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
   Programm, dazu Spanndruck, Teil und Notizen, siehe [Einrichteblatt](#einrichteblatt).
 - **Korrekturblatt als PDF**: Seite 1 links, Seite 2 rechts, je Werkzeug viel Platz für
   Bemerkungen, siehe [Korrekturblatt](#korrekturblatt).
+- **Kontur → Code**: Teil mit Maßen eingeben, in der Zeichnung antippen, ob gedreht, gefräst
+  oder entgratet wird – auch Flächen, Nuten und Bohrungen auf Winkellagen (C-/Y-Achse).
+  Heraus kommt ein Sinumerik-Programm, siehe [Kontur → Code](#kontur--code).
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
 - **LEDs für die Steuerleitungen** CTS, DSR, CD und RI sowie TX/RX, wie im alten Programm.
 - **Warnung vor Sonderzeichen** (ä, ö, ü, Ø …), die viele Steuerungen mit Alarm ablehnen.
@@ -280,6 +283,112 @@ lässt sie sich per Antippen der Zeile von Hand ändern.
 
 Die Datei heißt z. B. `METLOG_300069_Korrekturblatt.pdf` und liegt neben dem Programm.
 
+## Kontur → Code
+
+Die Taste **Kontur → Code …** (rechts unter „BEARBEITEN“) öffnet den Kontur-Assistenten:
+Maße des Teils eingeben, in der Zeichnung ein Element antippen und sagen, was damit passiert –
+**drehen**, **fräsen** (auch auf Winkellagen mit C- und Y-Achse) oder **entgraten**. Daraus
+entsteht ein Sinumerik-Programm im Stil der vorhandenen Programme.
+
+![Kontur-Assistent: Element angetippt](docs/kontur.png)
+
+### So geht's
+
+1. **Reiter „Kontur“**: Rohteil-Ø und Planaufmaß eintragen. Die Kontur wird von der Stirnseite
+   (Nullpunkt X0 Z0 in der Mitte) nach links eingegeben:
+   - **+ Absatz …**: Durchmesser und Länge, z. B. Ø20 × 15, dann Ø26 × 15. Die Punkte setzt das
+     Programm selbst.
+   - **+ Punkt …**: einzelner Punkt mit X (Ø) und Z, z. B. für einen Kegel.
+2. **In der Zeichnung antippen:**
+   - **Element** (Linie): **Drehen** oder **Nicht drehen**. Unter „Fräsen hier“ legt man direkt
+     eine Fläche, Nut oder Bohrung an dieser Stelle an (Z-Bereich wird übernommen).
+   - **Punkt** (Kreis an der Ecke): **Scharf**, **Entgraten** (kleine Fase, Größe unter
+     „Entgraten = Fase“), **Fase …** oder **Radius …**.
+   - **Fräsung**: ändern, Entgraten ein/aus, löschen.
+3. **Reiter „Fräsen“** – Fräsungen und Bohrungen auf Winkellagen:
+
+   | Art | Werkzeug | Eingaben |
+   |---|---|---|
+   | Fläche / Mehrkant | Fräser, radial (Y-Achse) | Z rechts/links, Schlüsselweite |
+   | Längsnut | Fräser, radial (Y-Achse) | Z rechts/links, Breite, Tiefe |
+   | Bohrung radial | Bohrer, radial | Z, Ø, Tiefe |
+   | Bohrung Stirnseite | Bohrer, axial | Lochkreis-Ø, Ø, Tiefe |
+
+   Die **Winkel C** trägt man einfach ein (`0 180`, `0 120 240`) oder verteilt sie mit
+   **2× / 3× / 4× / 6×** gleichmäßig. Die **Stirnansicht** rechts in der Zeichnung zeigt die
+   Lagen (0° oben). „Kanten entgraten“ fährt danach mit einem 90°-Fasenfräser die Kanten der
+   Fläche/Nut ab bzw. senkt die Bohrungen an.
+4. **Reiter „Werkzeuge“**: Revolverbelegung mit T-Nummer, Bezeichnung (kommt in den Kommentar),
+   Art, Lage (radial/axial), Ø, Drehzahl, Vorschub und Zustellung.
+5. **Reiter „Code“**: fertiges Programm und die Werkzeugbahn in der Zeichnung (gestrichelt
+   Eilgang, durchgezogen Vorschub). Dann **Als neues Programm** (mit `%_N_…_MPF` und `M30`) oder
+   **Am Cursor einfügen**, z. B. in ein vorhandenes KANAL1-Programm. Speichern und Senden wie gewohnt.
+
+![Code und Werkzeugbahn](docs/kontur_code.png)
+
+### Was erzeugt wird
+
+Je Arbeitsgang ein Kommentar über dem Werkzeug – so erkennen Einricht- und Korrekturblatt die
+Bearbeitung. Drehen wird achsparallel geschruppt (Stufen entlang der Kontur nachgezogen,
+Aufmaß X/Z bleibt stehen) und mit Schneidenradiuskorrektur G42 geschlichtet:
+
+```
+;FERTIGDREHEN VCMT04
+T02D1 G95 G18 S2500 M3 M8
+G00 X0 Z2
+G42 G01 Z0 F0.1
+G01 X18
+G01 X20 Z-1
+G01 Z-14
+G02 X22 Z-15 CR=1
+…
+G40 G00 X150
+G00 Z130
+```
+
+Fräsen und Bohren: Hauptspindel mit `SPOS=DC(Winkel)` positionieren, angetriebenes Werkzeug
+`S3=… M3=3`, Vorschub `G94`, Ebene `G19` (radial, Y-Achse) bzw. `G17` (axial). Eingetaucht wird
+nur außerhalb des Teils, zum Schluss `M3=5`, `Y0`, Wechselpunkt und `G18`:
+
+```
+;FRAESEN FLAECHE SW17 FRAESER D8
+T05D1 G94 G19 M8
+SPOS=DC(0)
+S3=3000 M3=3
+G00 Y-10.268 Z-3
+G00 X24
+G01 X18.5 F300
+G01 Y10.268
+…
+SPOS=DC(180)
+…
+```
+
+**Reiter „Maschine“**: Werkzeugwechselpunkt (X150 Z130), Sicherheitsabstand, Vorlage zum
+Positionieren der Spindel (`SPOS=DC({W})`, `{W}` = Winkel; z. B. auch `C=DC({W})`), Spindelnummer
+des angetriebenen Werkzeugs und M-Befehle zum Klemmen/Lösen der Spindel. Alle Eingaben werden
+gemerkt (`kontur.json` neben der `config.json`).
+
+### Prüfungen
+
+Der Assistent erzeugt lieber keinen Code als einen gefährlichen. Er meldet z. B.:
+
+- Kontur mit Einstich oder Hinterschnitt (Durchmesser wird nach links kleiner)
+- Fase/Radius zu groß, Kontur größer als das Rohteil
+- Fräser zu groß für Fläche oder Nut, falsches Werkzeug (z. B. axialer Bohrer für eine Querbohrung)
+- Entgraten direkt neben einem größeren Absatz (der Kegel des Fasenfräsers käme dagegen)
+- Querbohrung, die einen Absatz anschneidet, oder Stirnbohrung hinter einem größeren Durchmesser
+
+### Grenzen
+
+Noch nicht enthalten: andere Steuerungen als Sinumerik, Einstiche, Innenbearbeitung,
+Bahnen mit TRANSMIT/TRACYL. Die Ecken einer Nut haben den Fräserradius; die Kanten an der
+Stirnseite einer offenen Nut werden nicht entgratet.
+
+> **Wichtig:** Der erzeugte Code ist ein Vorschlag. Vor dem ersten Lauf an der Steuerung
+> simulieren bzw. mit reduziertem Eilgang und Vorschub einfahren, Werkzeugdaten und Spannung
+> prüfen. Maschinenspezifische M-Befehle (Klemmung, C-Achse) im Reiter „Maschine“ eintragen.
+
 ## Warum sind die Zeilen früher verrutscht?
 
 Steuerungen beenden Zeilen unterschiedlich. Eine **Fanuc** gibt am Zeilenende standardmäßig
@@ -354,13 +463,16 @@ Mit dem Finger scrollt man im Editor auf der Spalte mit den Zeilennummern oder
 ```
 cnc_dnc/
   textutil.py     Zeilenenden, Sendeaufbereitung, Programmende, Programmnamen
+  kontur.py       Kontur-Assistent: Geometrie, Schruppen/Schlichten, Fräsen auf Winkellagen
+  kontur_dialog.py  Fenster „Kontur → Code“ mit Zeichnung zum Antippen
   serial_link.py  Schnittstelle, Senden/Empfangen im Hintergrund-Thread
   config.py       Maschinenprofile, Speichern als JSON
   app.py          Hauptfenster
   dialogs.py      Rückfragen, Maschinenliste, Maschinen-Einstellungen
   widgets.py      Touch-Buttons, LEDs, Editor
   theme.py        Farben, Schriften, Stile
-tests/            pytest (Text-Logik, echte Übertragung über virtuelles Kabel, Oberfläche)
+tests/            pytest (Text-Logik, echte Übertragung über virtuelles Kabel, Oberfläche,
+                  Kontur-Code mit Abtragssimulation: kein Eilgang ins Material, Kontur fertig)
 ```
 
 Tests (unter Linux inklusive Übertragung über ein virtuelles Schnittstellenpaar und Oberfläche):

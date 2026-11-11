@@ -1,0 +1,1163 @@
+"""Kontur-Assistent: Drehkontur und Fräsungen auf Winkellagen  ->  Sinumerik-Programm.
+
+Ohne Oberfläche, damit alles mit Tests abgesichert werden kann. Das Fenster dazu steht in
+``kontur_dialog.py``.
+
+Koordinaten
+-----------
+* Die Kontur wird wie in der Zeichnung eingegeben: X als **Durchmesser**, Z mit Nullpunkt in
+  der **Mitte der Stirnseite**, das Teil liegt bei Z negativ. Erster Punkt ist immer X0 Z0.
+* Intern wird mit dem **Radius** ``r = X/2`` gerechnet; Punkte sind Paare ``(z, r)``.
+* Die Kontur muss von rechts nach links „steigen“ (X wird nicht kleiner, Z nicht größer).
+  Einstiche/Hinterschnitte können mit einem normalen Längsdrehmeißel nicht geschruppt werden
+  und werden deshalb (noch) abgelehnt.
+
+Erzeugter Code (Stil wie in den vorhandenen KANAL1/KANAL2-Programmen)
+--------------------------------------------------------------------
+* Je Arbeitsgang ein Kommentar über dem Werkzeug (``;VORDREHEN VNMG08``) – den nutzen auch
+  Einrichte- und Korrekturblatt.
+* Drehen: ``T01D1 G95 G18 S2300 M3 M8``, Schruppen achsparallel mit Nachziehen entlang der
+  Kontur, Schlichten mit Schneidenradiuskorrektur G42.
+* Fräsen/Bohren mit angetriebenem Werkzeug: Hauptspindel mit ``SPOS=DC(Winkel)`` positionieren,
+  Werkzeugspindel ``S3=… M3=3``, Vorschub G94, Ebene G19 (radial, Y-Achse) bzw. G17 (axial).
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import unicodedata
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+EPS = 1e-6
+TOL = 1e-3  # Eingabetoleranz in mm
+
+SEG_OPS = {"drehen": "Drehen", "frei": "Nicht drehen"}
+ECKEN = {"": "scharf", "entgraten": "Entgraten", "fase": "Fase", "radius": "Radius"}
+FEATURES = {
+    "flaeche": "Fläche / Mehrkant",
+    "nut": "Längsnut",
+    "bohrung_radial": "Bohrung radial",
+    "bohrung_axial": "Bohrung Stirnseite",
+}
+TOOL_ARTEN = {
+    "schruppen": "Drehen schruppen",
+    "schlichten": "Drehen schlichten",
+    "fraeser": "Fräser",
+    "bohrer": "Bohrer",
+    "fase": "Fasenfräser 90°",
+}
+LAGEN = {"": "–", "radial": "radial", "axial": "axial"}
+# Welche Werkzeuglage eine Fräsung braucht
+FEATURE_LAGE = {"flaeche": "radial", "nut": "radial", "bohrung_radial": "radial", "bohrung_axial": "axial"}
+
+
+# ==========================================================================
+# Datenmodell
+# ==========================================================================
+
+
+@dataclass
+class KPunkt:
+    """Konturpunkt. ``op`` gilt für das Element, das **in** diesem Punkt endet."""
+
+    x: float = 0.0  # Durchmesser
+    z: float = 0.0
+    ecke: str = ""  # "" | "entgraten" | "fase" | "radius"
+    wert: float = 0.0  # Fasenlänge bzw. Radius
+    op: str = "drehen"  # "drehen" | "frei"
+
+
+@dataclass
+class Werkzeug:
+    t: int = 1
+    d: int = 1
+    name: str = ""
+    art: str = "schruppen"
+    lage: str = ""  # bei angetriebenen Werkzeugen "radial" oder "axial"
+    dm: float = 0.0  # Durchmesser (Fräser, Bohrer, Fasenfräser)
+    s: float = 2000.0  # Drehzahl
+    f: float = 0.2  # Drehen mm/U, Fräsen/Bohren mm/min
+    ap: float = 1.0  # Zustellung (Drehen je Seite, Fräsen Tiefe je Schnitt, Bohren Spanbruch-Tiefe)
+
+    @property
+    def label(self) -> str:
+        return "T{} {}".format(self.t, self.name).strip()
+
+
+@dataclass
+class Fraesung:
+    art: str = "flaeche"
+    winkel: List[float] = field(default_factory=lambda: [0.0])
+    z1: float = 0.0  # Fläche/Nut: Z rechts · Bohrung radial: Z der Bohrung · Stirn: Z der Oberfläche
+    z2: float = -10.0  # Fläche/Nut: Z links
+    mass: float = 10.0  # Fläche: Schlüsselweite (Maß über Fläche) · Nut: Breite · Bohrung: Ø
+    tiefe: float = 2.0  # Nut/Bohrung
+    teilkreis: float = 0.0  # Bohrung Stirnseite: Lochkreis-Ø
+    wz: int = 0
+    entgraten: bool = False
+    wz_entgraten: int = 0
+    fase: float = 0.3
+
+
+@dataclass
+class Teil:
+    name: str = "TEIL"
+    rohteil_d: float = 32.0
+    planaufmass: float = 0.5
+    punkte: List[KPunkt] = field(default_factory=lambda: [KPunkt(0.0, 0.0)])
+    fraesungen: List[Fraesung] = field(default_factory=list)
+    werkzeuge: List[Werkzeug] = field(default_factory=list)
+    wz_schruppen: int = 1
+    wz_schlichten: int = 2
+    aufmass_x: float = 0.4  # Schlichtaufmaß im Durchmesser
+    aufmass_z: float = 0.1
+    kante: float = 0.2  # „Entgraten“ an Drehkanten = Fase dieser Größe
+    wechsel_x: float = 150.0
+    wechsel_z: float = 130.0
+    sicherheit: float = 2.0
+    spos: str = "SPOS=DC({W})"
+    wz_spindel: int = 3
+    klemmen: str = ""
+    loesen: str = ""
+
+    def tool(self, t: int) -> Optional[Werkzeug]:
+        for w in self.werkzeuge:
+            if w.t == t:
+                return w
+        return None
+
+    # -- Speichern / Laden ----------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Teil":
+        base = cls()
+        if not isinstance(data, dict):
+            return base
+        for f in fields(cls):
+            if f.name in ("punkte", "fraesungen", "werkzeuge") or f.name not in data:
+                continue
+            default = getattr(base, f.name)
+            try:
+                value = type(default)(data[f.name])
+            except (TypeError, ValueError):
+                continue
+            setattr(base, f.name, value)
+        base.punkte = [_load(KPunkt, p) for p in data.get("punkte", []) if isinstance(p, dict)] or base.punkte
+        base.fraesungen = [_load(Fraesung, p) for p in data.get("fraesungen", []) if isinstance(p, dict)]
+        base.werkzeuge = [_load(Werkzeug, p) for p in data.get("werkzeuge", []) if isinstance(p, dict)]
+        for fr in base.fraesungen:
+            fr.winkel = [float(w) for w in fr.winkel if isinstance(w, (int, float))] or [0.0]
+        base.punkte[0].x, base.punkte[0].z = 0.0, 0.0
+        return base
+
+
+def load_teil(path: str) -> Teil:
+    """Zuletzt bearbeitetes Teil laden; beim ersten Mal (oder kaputter Datei) das Beispiel."""
+    import json
+
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return Teil.from_dict(json.load(fh))
+    except (OSError, ValueError):
+        return beispiel_teil()
+
+
+def save_teil(teil: Teil, path: str) -> None:
+    import json
+    import os
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(teil.to_dict(), fh, indent=1, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _load(cls, data: Dict[str, Any]):
+    obj = cls()
+    for f in fields(cls):
+        if f.name not in data:
+            continue
+        default = getattr(obj, f.name)
+        value = data[f.name]
+        try:
+            if isinstance(default, list):
+                value = list(value)
+            elif isinstance(default, bool):
+                value = bool(value)
+            else:
+                value = type(default)(value)
+        except (TypeError, ValueError):
+            continue
+        setattr(obj, f.name, value)
+    return obj
+
+
+def standard_werkzeuge() -> List[Werkzeug]:
+    return [
+        Werkzeug(1, 1, "VNMG08", "schruppen", "", 0, 2300, 0.25, 1.5),
+        Werkzeug(2, 1, "VCMT04", "schlichten", "", 0, 2500, 0.1, 0),
+        Werkzeug(5, 1, "FRAESER D8", "fraeser", "radial", 8, 3000, 300, 1.0),
+        Werkzeug(6, 1, "BOHRER D5", "bohrer", "radial", 5, 2500, 150, 5),
+        Werkzeug(7, 1, "FASENFRAESER 90", "fase", "radial", 10, 4000, 400, 0),
+        Werkzeug(8, 1, "BOHRER D5", "bohrer", "axial", 5, 2500, 150, 5),
+    ]
+
+
+def neues_teil() -> Teil:
+    return Teil(werkzeuge=standard_werkzeuge())
+
+
+def beispiel_teil() -> Teil:
+    """Kleine Welle mit zwei Schlüsselflächen und einer Querbohrung (zum Ausprobieren)."""
+    t = neues_teil()
+    t.name = "BEISPIEL"
+    t.punkte = [
+        KPunkt(0, 0),
+        KPunkt(20, 0, "fase", 1.0),
+        KPunkt(20, -15, "radius", 1.0),
+        KPunkt(26, -15, "entgraten"),
+        KPunkt(26, -30),
+        KPunkt(32, -30),
+        KPunkt(32, -40, op="frei"),
+    ]
+    t.fraesungen = [
+        Fraesung("flaeche", [0.0, 180.0], 0.0, -10.0, 17.0, 0, 0, 5, True, 7, 0.3),
+        Fraesung("bohrung_radial", [90.0], -22.5, 0, 5.0, 6.0, 0, 6, True, 7, 0.3),
+    ]
+    return t
+
+
+# ==========================================================================
+# Hilfsfunktionen
+# ==========================================================================
+
+
+def fmt(v: float) -> str:
+    """Zahl für das NC-Programm: max. 3 Nachkommastellen, ohne überflüssige Nullen."""
+    v = round(float(v), 3)
+    if abs(v) < 0.0005:
+        return "0"
+    s = "{:.3f}".format(v).rstrip("0").rstrip(".")
+    return s
+
+
+def parse_num(text: str) -> float:
+    """Zahl aus einer Eingabe – Komma oder Punkt als Dezimaltrenner."""
+    s = str(text).strip().replace(",", ".").replace(" ", "")
+    if not s:
+        raise ValueError("leer")
+    return float(s)
+
+
+def parse_winkel(text: str) -> List[float]:
+    """„0 180“, „0;90;180“, „0, 120, 240“ -> Liste in Grad (0 … <360, ohne Doppelte).
+
+    Komma trennt hier Winkel; Kommazahlen bitte mit Punkt schreiben (22.5).
+    """
+    parts = [p for p in re.split(r"[\s,;/]+", str(text).strip()) if p]
+    result: List[float] = []
+    for p in parts:
+        w = parse_num(p) % 360.0
+        if abs(w - 360.0) < TOL:
+            w = 0.0
+        if not any(abs(w - x) < TOL for x in result):
+            result.append(w)
+    if not result:
+        raise ValueError("kein Winkel")
+    return result
+
+
+def gleich_verteilt(anzahl: int, start: float = 0.0) -> List[float]:
+    return [round((start + i * 360.0 / anzahl) % 360.0, 3) for i in range(max(1, anzahl))]
+
+
+def winkel_text(winkel: Sequence[float]) -> str:
+    return " ".join(fmt(w) for w in winkel)
+
+
+_TRANS = str.maketrans({"Ä": "AE", "Ö": "OE", "Ü": "UE", "ß": "SS", "Ø": "D", "ø": "D", "°": " GRAD", "×": "X"})
+
+
+def nc_text(text: str) -> str:
+    """Kommentartext nur aus Zeichen, die jede Steuerung verträgt (A-Z, 0-9, wenige Zeichen)."""
+    s = str(text).upper().translate(_TRANS)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^A-Z0-9 .,:+\-_=/*#]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def nc_name(text: str) -> str:
+    s = re.sub(r"[^A-Z0-9_]", "_", nc_text(text).replace(" ", "_"))
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        s = "TEIL"
+    if s[0].isdigit():
+        s = "T" + s
+    return s[:24]
+
+
+# ==========================================================================
+# Geometrie der Drehkontur
+# ==========================================================================
+
+
+@dataclass
+class Elem:
+    """Konturelement in (z, r). Linie oder Kreisbogen (Fase/Radius an einer Ecke)."""
+
+    z0: float
+    r0: float
+    z1: float
+    r1: float
+    arc: bool = False
+    ccw: bool = False
+    radius: float = 0.0
+    cz: float = 0.0
+    cr: float = 0.0
+    seg: int = -1  # Nummer des eingegebenen Elements (endet in Punkt seg)
+    corner: int = -1  # Nummer des Punkts, an dem die Fase/der Radius sitzt
+
+    def points(self, max_deg: float = 5.0) -> List[Tuple[float, float]]:
+        """Stützpunkte (ohne Startpunkt); Bögen werden fein in Geraden zerlegt."""
+        if not self.arc:
+            return [(self.z1, self.r1)]
+        a0 = math.atan2(self.r0 - self.cr, self.z0 - self.cz)
+        a1 = math.atan2(self.r1 - self.cr, self.z1 - self.cz)
+        da = a1 - a0
+        if self.ccw and da < 0:
+            da += 2 * math.pi
+        if not self.ccw and da > 0:
+            da -= 2 * math.pi
+        n = max(2, int(math.ceil(abs(math.degrees(da)) / max_deg)))
+        pts = []
+        for i in range(1, n + 1):
+            a = a0 + da * i / n
+            pts.append((self.cz + self.radius * math.cos(a), self.cr + self.radius * math.sin(a)))
+        pts[-1] = (self.z1, self.r1)
+        return pts
+
+
+@dataclass
+class Geometrie:
+    elems: List[Elem] = field(default_factory=list)  # komplette Kontur
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    turned: List[bool] = field(default_factory=list)  # je Element 1..n (Index 0 unbenutzt)
+    first: int = 0  # erstes/letztes gedrehtes Element (0 = keines)
+    last: int = 0
+
+    def turn_elems(self) -> List[Elem]:
+        if not self.first:
+            return []
+        out = []
+        for e in self.elems:
+            if e.seg >= 0 and self.first <= e.seg <= self.last:
+                out.append(e)
+            elif e.corner >= 0 and self.first <= e.corner < self.last:
+                out.append(e)
+        return out
+
+
+def _unit(dz: float, dr: float) -> Tuple[float, float, float]:
+    ln = math.hypot(dz, dr)
+    return (dz / ln, dr / ln, ln) if ln > EPS else (0.0, 0.0, 0.0)
+
+
+def build_geometry(teil: Teil) -> Geometrie:
+    g = Geometrie()
+    pts = teil.punkte
+    n = len(pts) - 1
+    if n < 1:
+        g.errors.append("Die Kontur braucht mindestens einen zweiten Punkt.")
+        return g
+    if abs(pts[0].x) > TOL or abs(pts[0].z) > TOL:
+        g.errors.append("Der erste Punkt muss X0 Z0 sein (Mitte der Stirnseite).")
+        return g
+    if teil.rohteil_d <= 0:
+        g.errors.append("Rohteil-Durchmesser fehlt.")
+        return g
+    R_s = teil.rohteil_d / 2.0
+    zr = [(p.z, p.x / 2.0) for p in pts]
+    dirs: List[Tuple[float, float, float]] = [(0.0, 0.0, 0.0)]
+    for i in range(1, n + 1):
+        dz, dr = zr[i][0] - zr[i - 1][0], zr[i][1] - zr[i - 1][1]
+        u = _unit(dz, dr)
+        dirs.append(u)
+        if u[2] < TOL:
+            g.errors.append("Punkt {} liegt auf Punkt {} – bitte löschen oder ändern.".format(i, i - 1))
+        elif zr[i][1] < TOL and zr[i - 1][1] < TOL:
+            g.errors.append("Element {} liegt auf der Mittelachse (X0).".format(i))
+        elif dz > TOL or dr < -TOL:
+            g.errors.append(
+                "Element {} (Punkt {} → {}): Die Kontur muss von der Stirnseite nach links verlaufen und "
+                "darf im Durchmesser nicht kleiner werden. Einstiche und Hinterschnitte gehen noch nicht."
+                .format(i, i - 1, i))
+        if pts[i].x < -TOL:
+            g.errors.append("Punkt {}: X darf nicht negativ sein.".format(i))
+        if pts[i].x / 2.0 > R_s + TOL:
+            g.errors.append("Punkt {}: Ø{} ist größer als das Rohteil (Ø{}).".format(i, fmt(pts[i].x),
+                                                                                    fmt(teil.rohteil_d)))
+    if g.errors:
+        return g
+
+    # Welche Elemente werden gedreht?
+    g.turned = [False] + [pts[i].op != "frei" for i in range(1, n + 1)]
+    turned_idx = [i for i in range(1, n + 1) if g.turned[i]]
+    if turned_idx:
+        g.first, g.last = turned_idx[0], turned_idx[-1]
+        for i in range(g.first, g.last + 1):
+            if not g.turned[i]:
+                g.errors.append("Element {}: „Nicht drehen“ geht nur für die Stirnfläche am Anfang oder für die "
+                                "letzten Elemente der Kontur.".format(i))
+        if g.first > 1:
+            # vorne darf nur die Stirnfläche (senkrecht ab X0) ausgelassen werden
+            if not (g.first == 2 and abs(dirs[1][0]) < EPS):
+                g.errors.append("„Nicht drehen“ am Anfang geht nur für die Stirnfläche (senkrecht ab X0).")
+    if g.errors:
+        return g
+
+    # Ecken: Fase / Radius / Entgraten -> Kürzung der angrenzenden Elemente
+    trims = [0.0] * (n + 1)
+    kinds: Dict[int, Tuple[str, float]] = {}
+    for i in range(1, n):
+        p = pts[i]
+        if not p.ecke:
+            continue
+        value = teil.kante if p.ecke == "entgraten" else p.wert
+        if value <= TOL:
+            g.errors.append("Punkt {}: Größe für {} fehlt.".format(i, ECKEN.get(p.ecke, p.ecke)))
+            continue
+        if g.first and not (g.turned[i] and g.turned[i + 1]):
+            g.warnings.append("Punkt {}: {} liegt am Rand der Drehbearbeitung und wird nicht gefertigt."
+                              .format(i, ECKEN.get(p.ecke, p.ecke)))
+            continue
+        d1, d2 = dirs[i], dirs[i + 1]
+        cross = d1[0] * d2[1] - d1[1] * d2[0]
+        dot = d1[0] * d2[0] + d1[1] * d2[1]
+        theta = math.atan2(abs(cross), dot)
+        if theta < math.radians(0.5):
+            g.warnings.append("Punkt {}: keine Ecke (gerade weiter) – {} entfällt.".format(i, ECKEN[p.ecke]))
+            continue
+        if p.ecke == "radius":
+            trims[i] = value * math.tan(theta / 2.0)
+        else:
+            trims[i] = value
+        kinds[i] = (p.ecke, value)
+    for i in range(1, n + 1):
+        if trims[i - 1] + trims[i] > dirs[i][2] + TOL:
+            g.errors.append("Element {}: Fase/Radius an den Enden passt nicht auf die Länge {}."
+                            .format(i, fmt(dirs[i][2])))
+    if g.errors:
+        return g
+
+    for i in range(1, n + 1):
+        dz, dr, ln = dirs[i]
+        z0, r0 = zr[i - 1]
+        z1, r1 = zr[i]
+        a = (z0 + dz * trims[i - 1], r0 + dr * trims[i - 1])
+        b = (z1 - dz * trims[i], r1 - dr * trims[i])
+        if math.hypot(b[0] - a[0], b[1] - a[1]) > EPS:
+            g.elems.append(Elem(a[0], a[1], b[0], b[1], seg=i))
+        if i in kinds:
+            kind, value = kinds[i]
+            d2 = dirs[i + 1]
+            c = (z1 + d2[0] * trims[i], r1 + d2[1] * trims[i])
+            if kind == "radius":
+                cross = dz * d2[1] - dr * d2[0]
+                ccw = cross > 0
+                nz, nr = (-dr, dz) if ccw else (dr, -dz)
+                g.elems.append(Elem(b[0], b[1], c[0], c[1], arc=True, ccw=ccw, radius=value,
+                                    cz=b[0] + nz * value, cr=b[1] + nr * value, corner=i))
+            else:
+                g.elems.append(Elem(b[0], b[1], c[0], c[1], corner=i))
+    return g
+
+
+def polyline(elems: Sequence[Elem], max_deg: float = 5.0) -> List[Tuple[float, float]]:
+    if not elems:
+        return []
+    pts = [(elems[0].z0, elems[0].r0)]
+    for e in elems:
+        pts.extend(e.points(max_deg))
+    return pts
+
+
+def contour_radius(teil: Teil, geom: Geometrie, z_lo: float, z_hi: float) -> float:
+    """Größter Radius des Teils zwischen z_lo und z_hi (vor der Stirnseite: 0, hinter der Kontur: Rohteil)."""
+    if z_lo > z_hi:
+        z_lo, z_hi = z_hi, z_lo
+    pl = polyline(geom.elems, 2.0)
+    best = 0.0
+    if not pl:
+        return teil.rohteil_d / 2.0
+    for j in range(1, len(pl)):
+        (za, ra), (zb, rb) = pl[j - 1], pl[j]
+        lo, hi = min(za, zb), max(za, zb)
+        if hi < z_lo - EPS or lo > z_hi + EPS:
+            continue
+        if abs(zb - za) < EPS:
+            best = max(best, ra, rb)
+            continue
+        for zz in (max(lo, z_lo), min(hi, z_hi)):
+            t = (zz - za) / (zb - za)
+            best = max(best, ra + t * (rb - ra))
+    if z_lo < pl[-1][0] - TOL:  # Bereich hinter dem Konturende ist Rohteil
+        best = max(best, teil.rohteil_d / 2.0)
+    return best
+
+
+# ==========================================================================
+# NC-Ausgabe
+# ==========================================================================
+
+
+@dataclass
+class Move:
+    """Bewegung für die Vorschau/Prüfung (Drehen, in z/r)."""
+
+    kind: str  # "G0" | "G1" | "G2" | "G3"
+    z0: float
+    r0: float
+    z1: float
+    r1: float
+    radius: float = 0.0
+
+    def points(self) -> List[Tuple[float, float]]:
+        """Stützpunkte (z, r) inkl. Start; Bögen (kürzerer Bogen, CR=) in 10°-Schritten."""
+        if self.kind not in ("G2", "G3") or self.radius <= EPS:
+            return [(self.z0, self.r0), (self.z1, self.r1)]
+        dz, dr = self.z1 - self.z0, self.r1 - self.r0
+        chord = math.hypot(dz, dr)
+        if chord < EPS:
+            return [(self.z0, self.r0), (self.z1, self.r1)]
+        h = math.sqrt(max(0.0, self.radius ** 2 - chord ** 2 / 4))
+        sign = 1 if self.kind == "G3" else -1  # Mittelpunkt links (G3) bzw. rechts (G2) der Sehne
+        cz = (self.z0 + self.z1) / 2 - sign * h * dr / chord
+        cr = (self.r0 + self.r1) / 2 + sign * h * dz / chord
+        arc = Elem(self.z0, self.r0, self.z1, self.r1, True, self.kind == "G3", self.radius, cz, cr)
+        return [(self.z0, self.r0)] + arc.points(10.0)
+
+
+class _Out:
+    def __init__(self) -> None:
+        self.lines: List[str] = []
+        self.moves: List[Move] = []
+        self.z: Optional[float] = None
+        self.r: Optional[float] = None
+
+    def raw(self, line: str) -> None:
+        self.lines.append(line)
+
+    def _track(self, kind: str, z: Optional[float], r: Optional[float], radius: float = 0.0) -> None:
+        nz = self.z if z is None else z
+        nr = self.r if r is None else r
+        if self.z is not None and self.r is not None and nz is not None and nr is not None:
+            self.moves.append(Move(kind, self.z, self.r, nz, nr, radius))
+        self.z, self.r = nz, nr
+
+    def move(self, kind: str, r: Optional[float] = None, z: Optional[float] = None, pre: str = "",
+             post: str = "", radius: float = 0.0) -> None:
+        """Bewegung in X (Radius r, ausgegeben als Durchmesser) / Z. Unveränderte Achsen entfallen."""
+        words = [w for w in (pre, kind) if w]
+        axes = []
+        if r is not None and (self.r is None or fmt(2 * r) != fmt(2 * self.r) or kind in ("G02", "G03")):
+            axes.append("X" + fmt(2 * r))
+        if z is not None and (self.z is None or fmt(z) != fmt(self.z) or kind in ("G02", "G03")):
+            axes.append("Z" + fmt(z))
+        if not axes and not pre and not post:
+            return
+        words += axes
+        if post:
+            words.append(post)
+        self.raw(" ".join(words))
+        short = {"G00": "G0", "G01": "G1", "G02": "G2", "G03": "G3"}[kind]
+        self._track(short, z, r, radius)
+
+
+@dataclass
+class Ergebnis:
+    code: str = ""
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    moves: List[Move] = field(default_factory=list)  # Drehbearbeitung, für die Vorschau
+    arbeitsgaenge: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def _tool_line(w: Werkzeug, extra: str) -> str:
+    return "T{:02d}D{} {}".format(w.t, w.d, extra).strip()
+
+
+def _turn_head(out: _Out, title: str, w: Werkzeug) -> None:
+    out.raw("")
+    out.raw(";" + nc_text(title + " " + w.name))
+    out.raw(_tool_line(w, "G95 G18 S{} M3 M8".format(fmt(w.s))))
+
+
+def _retract(out: _Out, teil: Teil, g40: bool = False) -> None:
+    out.move("G00", r=teil.wechsel_x / 2.0, pre="G40" if g40 else "")
+    out.move("G00", z=teil.wechsel_z)
+
+
+def _cross(pl: List[Tuple[float, float]], level: float) -> Tuple[float, int]:
+    """Z, an dem die Kontur über ``level`` steigt, und Index des folgenden Punkts."""
+    for j in range(1, len(pl)):
+        (za, ra), (zb, rb) = pl[j - 1], pl[j]
+        if rb > level + EPS:
+            if rb - ra > EPS:
+                t = min(1.0, max(0.0, (level - ra) / (rb - ra)))
+                return za + t * (zb - za), j
+            return za, j
+    return pl[-1][0], len(pl)
+
+
+def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
+    elems = geom.turn_elems()
+    if not elems:
+        return
+    rough = teil.tool(teil.wz_schruppen)
+    fine = teil.tool(teil.wz_schlichten)
+    if rough is None:
+        res.errors.append("Schruppwerkzeug T{} steht nicht in der Werkzeugliste.".format(teil.wz_schruppen))
+    if fine is None:
+        res.errors.append("Schlichtwerkzeug T{} steht nicht in der Werkzeugliste.".format(teil.wz_schlichten))
+    if rough is not None and rough.ap <= TOL:
+        res.errors.append("Schruppwerkzeug T{}: Zustellung fehlt.".format(rough.t))
+    if res.errors:
+        return
+    assert rough is not None and fine is not None
+    R_s = teil.rohteil_d / 2.0
+    s = max(0.5, teil.sicherheit)
+    ax, az = max(0.0, teil.aufmass_x) / 2.0, max(0.0, teil.aufmass_z)
+    first = elems[0]
+    face = first.seg == 1 and abs(first.z1 - first.z0) < EPS and first.r0 < EPS
+    stock_front = max(0.0, teil.planaufmass)
+
+    # ---- Schruppen (Planen + Längs) ----
+    pl = [(z + az, r + ax) for z, r in polyline(elems)]
+    if pl[-1][1] < R_s + 0.5:  # Ende: senkrecht bis über das Rohteil (Absatz zum ungedrehten Rest)
+        pl.append((pl[-1][0], R_s + 0.5))
+    front = stock_front
+    passes_face: List[float] = []
+    if face and stock_front > pl[0][0] + TOL:
+        total = stock_front - pl[0][0]
+        n = int(math.ceil(total / rough.ap - 1e-9))
+        passes_face = [stock_front - total * k / n for k in range(1, n + 1)]
+        front = pl[0][0]
+    elif face:
+        front = max(stock_front, pl[0][0])
+    zs = front + s
+    k0 = 0
+    while k0 + 1 < len(pl) and abs(pl[k0 + 1][0] - pl[0][0]) < EPS:
+        k0 += 1  # senkrechter Anfang (Stirnfläche)
+    r_low = pl[k0][1]
+    levels: List[float] = []
+    if R_s - r_low > TOL:
+        n = int(math.ceil((R_s - r_low) / rough.ap - 1e-9))
+        levels = [R_s - (R_s - r_low) * k / n for k in range(1, n + 1)]
+    if passes_face or levels:
+        _turn_head(out, "VORDREHEN", rough)
+        res.arbeitsgaenge.append("Vordrehen T{}".format(rough.t))
+        out.move("G00", r=R_s + 1, z=stock_front + s)
+        for zf in passes_face:
+            out.move("G00", z=zf)
+            out.move("G01", r=-0.8, post="F" + fmt(rough.f))
+            out.move("G00", z=zf + 1)
+            out.move("G00", r=R_s + 1)
+        if levels:
+            out.move("G00", z=zs)
+        r_prev = R_s
+        feed_set = False
+        for rk in levels:
+            z_end, j = _cross(pl, rk)
+            if z_end < zs - TOL:
+                out.move("G00", r=rk)
+                out.move("G01", z=z_end, post="" if feed_set else "F" + fmt(rough.f))
+                feed_set = True
+                cz, cr = z_end, rk
+                for m in range(j, len(pl)):
+                    zb, rb = pl[m]
+                    if rb >= r_prev - EPS:
+                        if rb - cr > EPS:
+                            t = (r_prev - cr) / (rb - cr)
+                            cz, cr = cz + t * (zb - cz), r_prev
+                        else:
+                            cz, cr = zb, rb
+                        out.move("G01", r=cr, z=cz)
+                        break
+                    if abs(zb - cz) > EPS or abs(rb - cr) > EPS:
+                        out.move("G01", r=rb, z=zb)
+                    cz, cr = zb, rb
+                out.move("G01", r=cr + 0.5, z=cz + 0.5)
+                out.move("G00", z=zs)
+            r_prev = rk
+        _retract(out, teil)
+
+    # ---- Schlichten ----
+    last = elems[-1]
+    _turn_head(out, "FERTIGDREHEN", fine)
+    res.arbeitsgaenge.append("Fertigdrehen T{}".format(fine.t))
+    out.move("G00", r=first.r0, z=max(first.z0 + s, front + 1))
+    out.move("G01", z=first.z0, pre="G42", post="F" + fmt(fine.f))
+    for e in elems:
+        if e.arc:
+            out.move("G03" if e.ccw else "G02", r=e.r1, z=e.z1, post="CR=" + fmt(e.radius), radius=e.radius)
+        else:
+            out.move("G01", r=e.r1, z=e.z1)
+    out.move("G01", r=max(R_s, last.r1) + 0.5)
+    _retract(out, teil, g40=True)
+
+
+# ---------------------------------------------------------------------------
+# Fräsen / Bohren mit angetriebenem Werkzeug
+# ---------------------------------------------------------------------------
+
+
+class _MillOut:
+    def __init__(self) -> None:
+        self.lines: List[str] = []
+
+    def g(self, code: str, x: Optional[float] = None, y: Optional[float] = None, z: Optional[float] = None,
+          f: Optional[float] = None) -> None:
+        """x = Durchmesser (wie beim Drehen)."""
+        words = [code]
+        for name, v in (("X", x), ("Y", y), ("Z", z)):
+            if v is not None:
+                words.append(name + fmt(v))
+        if f is not None:
+            words.append("F" + fmt(f))
+        self.lines.append(" ".join(words))
+
+
+def _lin(a: float, b: float, n: int) -> List[float]:
+    if n <= 1:
+        return [a]
+    return [a + (b - a) * i / (n - 1) for i in range(n)]
+
+
+def _steps(top: float, bottom: float, ap: float) -> List[float]:
+    """Zwischentiefen von top nach bottom (inkl. bottom), höchstens ap je Schritt."""
+    depth = top - bottom
+    if depth <= TOL:
+        return [bottom]
+    n = int(math.ceil(depth / ap - 1e-9)) if ap > TOL else 1
+    return [top - depth * k / n for k in range(1, n + 1)]
+
+
+def _check_tool(res: Ergebnis, nr: int, fr: Fraesung, teil: Teil, t: int, arten: Sequence[str],
+                what: str) -> Optional[Werkzeug]:
+    w = teil.tool(t)
+    label = "Fräsung {} ({})".format(nr, FEATURES.get(fr.art, fr.art))
+    if w is None:
+        res.errors.append("{}: {} T{} steht nicht in der Werkzeugliste.".format(label, what, t))
+        return None
+    if w.art not in arten:
+        res.errors.append("{}: T{} ist ein {} – hier wird ein {} gebraucht.".format(
+            label, t, TOOL_ARTEN.get(w.art, w.art), " oder ".join(TOOL_ARTEN[a] for a in arten)))
+        return None
+    need = FEATURE_LAGE[fr.art]
+    if w.lage and w.lage != need:
+        res.errors.append("{}: T{} ist {} eingebaut, gebraucht wird ein {}es Werkzeug.".format(
+            label, t, LAGEN[w.lage], need))
+        return None
+    if w.art in ("fraeser", "fase") and w.dm <= TOL:
+        res.errors.append("{}: Durchmesser von T{} fehlt.".format(label, t))
+        return None
+    return w
+
+
+def _flaeche_umriss(fr: Fraesung, rp: float, z_front: float, run_out: bool) -> List[Tuple[float, float, float]]:
+    """Kanten einer Fläche als (y, z, r_kante) – lange Kanten, Bogen an der Wand, ggf. Stirnkante."""
+    h = fr.mass / 2.0
+    w2 = math.sqrt(max(0.0, rp * rp - h * h))
+    z_hi, z_lo = max(fr.z1, fr.z2), min(fr.z1, fr.z2)
+
+    def arc(zw: float, y0: float, y1: float) -> List[Tuple[float, float, float]]:
+        n = 16
+        return [(y, zw, math.sqrt(max(0.0, rp * rp - y * y))) for y in _lin(y0, y1, n + 1)]
+
+    pts = [(-w2, z_front if run_out else z_hi, h)]
+    pts += arc(z_lo, -w2, w2)
+    if run_out:
+        pts += [(w2, z_front, h), (-w2, z_front, h)]
+    else:
+        pts += arc(z_hi, w2, -w2)
+    return pts
+
+
+def _nut_umriss(fr: Fraesung, rp: float, rt: float, z_front: float, run_out: bool) -> List[Tuple[float, float, float]]:
+    """Obere Kanten einer Nut (Rechteck mit Fräserradius in den Ecken) als (y, z, r_kante)."""
+    b2 = fr.mass / 2.0
+    z_hi, z_lo = max(fr.z1, fr.z2), min(fr.z1, fr.z2)
+    rt = min(rt, b2)
+    yz: List[Tuple[float, float]] = []
+
+    def corner(cy: float, cz: float, a0: float, a1: float) -> None:
+        for i in range(1, 7):
+            a = math.radians(a0 + (a1 - a0) * i / 6)
+            yz.append((cy + rt * math.cos(a), cz + rt * math.sin(a)))
+
+    yz.append((-b2, z_front if run_out else z_hi - rt))
+    yz.append((-b2, z_lo + rt))
+    corner(-b2 + rt, z_lo + rt, 180, 270)
+    yz.append((b2 - rt, z_lo))
+    corner(b2 - rt, z_lo + rt, 270, 360)
+    if run_out:
+        yz.append((b2, z_front))
+    else:
+        yz.append((b2, z_hi - rt))
+        corner(b2 - rt, z_hi - rt, 0, 90)
+        yz.append((-b2 + rt, z_hi))
+        corner(-b2 + rt, z_hi - rt, 90, 180)
+    return [(y, z, math.sqrt(max(0.0, rp * rp - y * y))) for y, z in yz]
+
+
+def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeug, res: Ergebnis,
+                  deburr: bool) -> Optional[Tuple[str, str, List[str], str]]:
+    """Bewegungen je Winkellage. Ergebnis: (Titel, Ebene, Bewegungen, Rückzugsachse)."""
+    R_s = teil.rohteil_d / 2.0
+    s = max(0.5, teil.sicherheit)
+    label = "Fräsung {} ({})".format(nr, FEATURES.get(fr.art, fr.art))
+    z_front = 0.0
+    m = _MillOut()
+    c = fr.fase
+    rad = w.dm / 2.0
+
+    if fr.art in ("flaeche", "nut"):
+        z_hi, z_lo = max(fr.z1, fr.z2), min(fr.z1, fr.z2)
+        if z_hi - z_lo < TOL:
+            res.errors.append("{}: Z rechts und Z links sind gleich.".format(label))
+            return None
+        if z_lo < z_front - TOL and z_hi > z_front + TOL:
+            z_hi = z_front
+        run_out = z_hi >= z_front - TOL
+        # Anfahren über dem größten Durchmesser im Bereich (inkl. Absätze an den Rändern),
+        # Tiefe und Kanten vom Durchmesser, auf dem die Fräsung liegt
+        rp_all = contour_radius(teil, geom, z_lo, min(z_hi, z_front))
+        x_app = 2 * (rp_all + s)
+        rp = contour_radius(teil, geom, z_lo + 0.01, min(z_hi, z_front) - 0.01)
+
+        if fr.art == "flaeche":
+            h = fr.mass / 2.0
+            if h <= TOL or h >= rp - TOL:
+                res.errors.append("{}: Schlüsselweite {} muss kleiner als der Durchmesser Ø{} sein.".format(
+                    label, fmt(fr.mass), fmt(2 * rp)))
+                return None
+            title = "FRAESEN FLAECHE SW{}".format(fmt(fr.mass))
+            if deburr:
+                title = "ENTGRATEN FLAECHE SW{}".format(fmt(fr.mass))
+                pts = _flaeche_umriss(fr, rp, z_front, run_out)
+                if not _cone_clear(teil, geom, [(z, r - c) for _, z, r in pts], rad, rp):
+                    res.errors.append(_cone_msg(label, w))
+                    return None
+                _edge_path(m, pts, c, x_app, w.f)
+                return title, "G19", m.lines, "x"
+            zc_min = z_lo + rad
+            zc_max = max(zc_min, z_front + 1 - rad) if run_out else z_hi - rad
+            if zc_max < zc_min - TOL:
+                res.errors.append("{}: Fräser Ø{} ist zu groß für die Flächenlänge {}.".format(
+                    label, fmt(w.dm), fmt(z_hi - z_lo)))
+                return None
+            nz = int(math.ceil((zc_max - zc_min) / (0.7 * w.dm) - 1e-9)) + 1 if zc_max - zc_min > TOL else 1
+            zcs = _lin(zc_max, zc_min, nz)
+            y_out = math.sqrt(max(0.0, rp_all * rp_all - h * h)) + rad + 1
+            m.g("G00", z=zcs[0], y=-y_out)
+            m.g("G00", x=x_app)
+            side = -1
+            for i, hi in enumerate(_steps(rp, h, w.ap)):
+                order = zcs if i % 2 == 0 else list(reversed(zcs))
+                m.g("G01", x=2 * hi, f=w.f)
+                for k, zc in enumerate(order):
+                    if k:
+                        m.g("G01", z=zc)
+                    side = -side
+                    m.g("G01", y=side * y_out)
+            m.g("G00", x=x_app)
+            return title, "G19", m.lines, "x"
+
+        # Nut
+        b, t = fr.mass, fr.tiefe
+        if t <= TOL or t >= rp:
+            res.errors.append("{}: Tiefe {} passt nicht (Ø{}).".format(label, fmt(t), fmt(2 * rp)))
+            return None
+        if b <= TOL or b >= 2 * rp - TOL:
+            res.errors.append("{}: Breite {} passt nicht.".format(label, fmt(b)))
+            return None
+        title = "FRAESEN NUT {}X{}".format(fmt(b), fmt(t))
+        if deburr:
+            nut_tool = teil.tool(fr.wz)
+            corner_r = nut_tool.dm / 2.0 if nut_tool is not None and nut_tool.dm > 0 else 0.0
+            pts = _nut_umriss(fr, rp, corner_r, z_front, run_out)
+            if not _cone_clear(teil, geom, [(z, r - c) for _, z, r in pts], rad, rp):
+                res.errors.append(_cone_msg(label, w))
+                return None
+            _edge_path(m, pts, c, x_app, w.f)
+            return "ENTGRATEN NUT {}X{}".format(fmt(b), fmt(t)), "G19", m.lines, "x"
+        if w.dm > b + TOL:
+            res.errors.append("{}: Fräser Ø{} ist breiter als die Nut ({}).".format(label, fmt(w.dm), fmt(b)))
+            return None
+        zc_min = z_lo + rad
+        zc_max = z_front + rad + 1 if run_out else z_hi - rad
+        if zc_max < zc_min - TOL:
+            res.errors.append("{}: Fräser Ø{} ist zu groß für die Nutlänge {}.".format(
+                label, fmt(w.dm), fmt(z_hi - z_lo)))
+            return None
+        if b - w.dm <= TOL:
+            ys = [0.0]
+        else:
+            ys = _lin(-(b - w.dm) / 2, (b - w.dm) / 2, int(math.ceil((b - w.dm) / (0.75 * w.dm) - 1e-9)) + 1)
+        rb = rp - t
+        f_plunge = max(1.0, round(w.f * 0.3))
+        m.g("G00", z=zc_max, y=ys[0])
+        m.g("G00", x=x_app)
+        at_start = True
+        order = ys
+        for i, ri in enumerate(_steps(rp, rb, w.ap)):
+            m.g("G01", x=2 * ri, f=f_plunge)
+            for k, y in enumerate(order):
+                if k:
+                    m.g("G01", y=y)
+                m.g("G01", z=zc_min if at_start else zc_max, f=w.f if k == 0 else None)
+                at_start = not at_start
+            order = list(reversed(order))
+        m.g("G00", x=x_app)
+        return title, "G19", m.lines, "x"
+
+    if fr.art == "bohrung_radial":
+        d, t, zb = fr.mass, fr.tiefe, fr.z1
+        if d <= TOL or t <= TOL:
+            res.errors.append("{}: Durchmesser und Tiefe angeben.".format(label))
+            return None
+        rp = contour_radius(teil, geom, zb - 0.001, zb + 0.001)  # Oberfläche in der Bohrungsachse
+        if zb > z_front - d / 2 + TOL or rp <= TOL:
+            res.errors.append("{}: Z{} liegt nicht auf dem Teil.".format(label, fmt(zb)))
+            return None
+        rp_max = contour_radius(teil, geom, zb - d / 2 + 0.01, zb + d / 2 - 0.01)
+        if rp_max > rp + 0.5:
+            res.errors.append("{}: Die Bohrung Ø{} bei Z{} liegt zu nah an einem Absatz.".format(
+                label, fmt(d), fmt(zb)))
+            return None
+        x_app = 2 * (rp_max + s)
+        m.g("G00", z=zb, y=0)
+        m.g("G00", x=x_app)
+        if deburr:
+            if w.dm > 0 and d / 2 + c > rad + TOL:
+                res.errors.append("{}: Fasenfräser T{} (Ø{}) ist für Ø{} + Fase {} zu klein.".format(
+                    label, w.t, fmt(w.dm), fmt(d), fmt(c)))
+                return None
+            if not _cone_clear(teil, geom, [(zb, rp - d / 2 - c)], rad, rp):
+                res.errors.append(_cone_msg(label, w))
+                return None
+            m.g("G01", x=2 * (rp - d / 2 - c), f=w.f)
+            m.g("G00", x=x_app)
+            return "ENTGRATEN BOHRUNG D{}".format(fmt(d)), "G19", m.lines, "x"
+        if w.dm > 0 and abs(w.dm - d) > TOL:
+            res.warnings.append("{}: Bohrer T{} hat Ø{}, die Bohrung Ø{}.".format(label, w.t, fmt(w.dm), fmt(d)))
+        _peck(m, "x", x_app, [2 * v for v in _steps(rp, rp - t, w.ap if w.ap > TOL else t)], 1.0, w.f)
+        return "BOHREN D{} RADIAL".format(fmt(d)), "G19", m.lines, "x"
+
+    if fr.art == "bohrung_axial":
+        d, t, zf, lk = fr.mass, fr.tiefe, fr.z1, fr.teilkreis
+        if d <= TOL or t <= TOL:
+            res.errors.append("{}: Durchmesser und Tiefe angeben.".format(label))
+            return None
+        if lk < -TOL or lk / 2 + d / 2 > R_s + TOL:
+            res.errors.append("{}: Lochkreis Ø{} passt nicht auf das Teil.".format(label, fmt(lk)))
+            return None
+        if zf > z_front + TOL:
+            res.errors.append("{}: Z{} liegt vor der Stirnseite.".format(label, fmt(zf)))
+            return None
+        r_face = contour_radius(teil, geom, zf - 0.01, zf)
+        if lk / 2 + d / 2 + (c if deburr else 0) > r_face + TOL:
+            res.errors.append("{}: Die Bohrungen (Lochkreis Ø{}) liegen nicht auf der Planfläche bei Z{} "
+                              "(Ø{}).".format(label, fmt(lk), fmt(zf), fmt(2 * r_face)))
+            return None
+        if zf < z_front - TOL:
+            tool_r = max(d / 2, rad)
+            r_front = contour_radius(teil, geom, zf + 0.01, z_front)
+            if lk / 2 - tool_r < r_front - TOL:
+                res.errors.append("{}: Das Werkzeug käme auf dem Weg zur Planfläche bei Z{} an den davor liegenden "
+                                  "Durchmesser Ø{}.".format(label, fmt(zf), fmt(2 * r_front)))
+                return None
+        m.g("G00", x=lk, y=0)
+        m.g("G00", z=zf + s)
+        if deburr:
+            if w.dm > 0 and d / 2 + c > rad + TOL:
+                res.errors.append("{}: Fasenfräser T{} (Ø{}) ist für Ø{} + Fase {} zu klein.".format(
+                    label, w.t, fmt(w.dm), fmt(d), fmt(c)))
+                return None
+            m.g("G01", z=zf - d / 2 - c, f=w.f)
+            m.g("G00", z=zf + s)
+            return "ENTGRATEN STIRNBOHRUNG D{}".format(fmt(d)), "G17", m.lines, "z"
+        if w.dm > 0 and abs(w.dm - d) > TOL:
+            res.warnings.append("{}: Bohrer T{} hat Ø{}, die Bohrung Ø{}.".format(label, w.t, fmt(w.dm), fmt(d)))
+        _peck(m, "z", zf + s, _steps(zf, zf - t, w.ap if w.ap > TOL else t), 0.5, w.f)
+        return "BOHREN D{} STIRN".format(fmt(d)), "G17", m.lines, "z"
+
+    res.errors.append("{}: unbekannte Art „{}“.".format(label, fr.art))
+    return None
+
+
+def _cone_clear(teil: Teil, geom: Geometrie, tips: List[Tuple[float, float]], rad: float, rp: float) -> bool:
+    """Stößt der Kegel eines 90°-Fasenfräsers (Spitzen bei (z, r)) an einen größeren Absatz?
+
+    Vorsichtig gerechnet: Der Kegel ist im Abstand d von der Achse um d höher als die Spitze;
+    jeder Durchmesser größer als ``rp`` (der bearbeitete) im Umkreis von ``rad`` muss darunter bleiben.
+    """
+    if not tips or rad <= 0:
+        return True
+    z_min = min(z for z, _ in tips) - rad
+    z_max = max(z for z, _ in tips) + rad
+    n = max(2, int(math.ceil((z_max - z_min) / 0.1)))
+    for i in range(n + 1):
+        z = z_min + (z_max - z_min) * i / n
+        big = contour_radius(teil, geom, z - 0.05, z + 0.05)
+        if big <= rp + TOL:
+            continue
+        for zt, rt in tips:
+            dz = abs(z - zt)
+            if dz <= rad and big > rt + dz + TOL:
+                return False
+    return True
+
+
+def _cone_msg(label: str, w: Werkzeug) -> str:
+    return ("{}: Entgraten geht hier nicht – der Fasenfräser T{} (Ø{}) käme an einen größeren Durchmesser "
+            "daneben. Entgraten ausschalten, kleineren Fasenfräser nehmen oder mehr Abstand zum Absatz."
+            .format(label, w.t, fmt(w.dm)))
+
+
+def _edge_path(m: _MillOut, pts: List[Tuple[float, float, float]], c: float, x_app: float, f: float) -> None:
+    """Fasenfräser (Spitze) entlang der Kanten: Achse auf der Kante, Spitze um die Fase tiefer."""
+    y0, z0, r0 = pts[0]
+    m.g("G00", z=z0, y=y0)
+    m.g("G00", x=x_app)
+    m.g("G01", x=2 * (r0 - c), f=f)
+    for y, z, r in pts[1:]:
+        m.g("G01", x=2 * (r - c), y=y, z=z)
+    m.g("G00", x=x_app)
+
+
+def _peck(m: _MillOut, axis: str, safe: float, depths: List[float], back: float, f: float) -> None:
+    """Tieflochbohren mit Spanbruch: nach jedem Schritt ganz raus, dann knapp über die letzte Tiefe."""
+    key = axis.lower()
+    prev = None
+    for i, dv in enumerate(depths):
+        if i:
+            m.g("G00", **{key: safe})
+            m.g("G00", **{key: prev + back})
+        m.g("G01", **{key: dv}, f=f if i == 0 else None)
+        prev = dv
+    m.g("G00", **{key: safe})
+
+
+def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
+    ops: List[Tuple[int, Fraesung, bool]] = []
+    for nr, fr in enumerate(teil.fraesungen, start=1):
+        ops.append((nr, fr, False))
+    for nr, fr in enumerate(teil.fraesungen, start=1):
+        if fr.entgraten:
+            ops.append((nr, fr, True))
+    n = teil.wz_spindel
+    for nr, fr, deburr in ops:
+        if not fr.winkel:
+            res.errors.append("Fräsung {}: Winkel fehlt.".format(nr))
+            continue
+        if deburr:
+            if fr.fase <= TOL:
+                res.errors.append("Fräsung {}: Fasengröße zum Entgraten fehlt.".format(nr))
+                continue
+            w = _check_tool(res, nr, fr, teil, fr.wz_entgraten, ("fase",), "Entgratwerkzeug")
+        else:
+            arten = ("bohrer", "fraeser") if fr.art.startswith("bohrung") else ("fraeser",)
+            w = _check_tool(res, nr, fr, teil, fr.wz, arten, "Werkzeug")
+        if w is None:
+            continue
+        if w.ap <= TOL and not deburr and fr.art in ("flaeche", "nut"):
+            res.errors.append("Fräsung {}: Zustellung (Tiefe je Schnitt) von T{} fehlt.".format(nr, w.t))
+            continue
+        body = _feature_body(teil, geom, nr, fr, w, res, deburr)
+        if body is None:
+            continue
+        title, plane, lines, axis = body
+        winkel = "/".join(fmt(a) for a in fr.winkel)
+        out.raw("")
+        # Kommentar direkt über dem Werkzeug = Bearbeitung auf Einricht-/Korrekturblatt
+        out.raw(";" + nc_text("{} {}".format(title, w.name)))
+        out.raw(_tool_line(w, "G94 {} M8".format(plane)))
+        for i, a in enumerate(fr.winkel):
+            if teil.loesen and i:
+                out.raw(teil.loesen)
+            out.raw(teil.spos.replace("{W}", fmt(a)))
+            if teil.klemmen:
+                out.raw(teil.klemmen)
+            if i == 0:
+                out.raw("S{}={} M{}=3".format(n, fmt(w.s), n))
+            out.lines.extend(lines)
+        if teil.loesen:
+            out.raw(teil.loesen)
+        if axis == "x":
+            out.raw("G00 Y0")
+            out.raw("M{}=5".format(n))
+            out.raw("G00 X{}".format(fmt(teil.wechsel_x)))
+            out.raw("G00 Z{}".format(fmt(teil.wechsel_z)))
+        else:
+            out.raw("G00 Y0")
+            out.raw("M{}=5".format(n))
+            out.raw("G00 Z{}".format(fmt(teil.wechsel_z)))
+            out.raw("G00 X{}".format(fmt(teil.wechsel_x)))
+        out.raw("G18")
+        res.arbeitsgaenge.append("{}{} · T{} · C {}°".format(
+            FEATURES.get(fr.art, fr.art), " entgraten" if deburr else "", w.t, winkel))
+
+
+def generate(teil: Teil, rahmen: bool = False) -> Ergebnis:
+    """Ganzes Programm erzeugen. ``rahmen``: mit Programmkopf (%_N_…_MPF) und M30."""
+    res = Ergebnis()
+    geom = build_geometry(teil)
+    res.errors.extend(geom.errors)
+    res.warnings.extend(geom.warnings)
+    if res.errors:
+        return res
+    if not geom.first and not teil.fraesungen:
+        res.errors.append("Es ist nichts zu bearbeiten: alle Elemente stehen auf „Nicht drehen“ und es gibt "
+                          "keine Fräsung.")
+        return res
+    if not (0 < teil.wz_spindel < 10):
+        res.errors.append("Spindelnummer des angetriebenen Werkzeugs muss 1 … 9 sein.")
+    if teil.fraesungen and "{W}" not in teil.spos:
+        res.errors.append("In der Vorlage zum Spindel-Positionieren fehlt {W} für den Winkel.")
+    if teil.wechsel_x / 2.0 < teil.rohteil_d / 2.0 + 1:
+        res.errors.append("Werkzeugwechselpunkt X{} liegt nicht außerhalb des Rohteils.".format(fmt(teil.wechsel_x)))
+    if teil.wechsel_z < teil.planaufmass + 5:
+        res.errors.append("Werkzeugwechselpunkt Z{} liegt zu nah an der Stirnseite.".format(fmt(teil.wechsel_z)))
+    if res.errors:
+        return res
+    out = _Out()
+    _turning(teil, geom, res, out)
+    _milling(teil, geom, res, out)
+    if res.errors:
+        return res
+    name = nc_name(teil.name)
+    head: List[str] = []
+    if rahmen:
+        head += ["%_N_{}_MPF".format(name), ";$PATH=/_N_MPF_DIR"]
+    head += [";KONTUR-ASSISTENT  TEIL {}".format(name),
+             ";ROHTEIL D{}  NULLPUNKT MITTE STIRNSEITE Z0".format(fmt(teil.rohteil_d)),
+             ";VOR DEM ERSTEN LAUF SIMULIEREN UND PRUEFEN"]
+    if rahmen:
+        head += ["G54 G90"]
+    body = list(out.lines)
+    tail = ["", "M30"] if rahmen else []
+    res.code = "\n".join(head + body + tail) + "\n"
+    res.moves = out.moves
+    return res
