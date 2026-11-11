@@ -201,8 +201,14 @@ class SetupSheetDialog(Dialog):
                          message="Aus dem Programm: {}".format(r.programs or "–")).show()
         if res is None:
             return
-        entry = self.data.korrektur.setdefault(r.key, {})
-        entry["side"] = 2 if res["side"] == "Seite 2" else 1
+        side = 2 if res["side"] == "Seite 2" else 1
+        for k in r.keys or (r.key,):
+            entry = self.data.korrektur.setdefault(k, {})
+            entry["side"] = side  # zusammengefasste Zeile wandert komplett
+            if k != r.key:
+                entry.pop("name", None)
+                entry.pop("remark", None)
+        entry = self.data.korrektur[r.key]
         if res["name"] != r.name or "name" in entry:
             entry["name"] = res["name"]
         entry["remark"] = res["remark"]

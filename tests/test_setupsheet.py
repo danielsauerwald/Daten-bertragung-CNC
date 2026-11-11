@@ -165,3 +165,37 @@ def test_tool_description_across_setup_lines():
     # eine Bewegung dazwischen -> Kommentar gehört nicht mehr dazu
     text2 = text.replace(";FRAESEN 5MM\nM5\n", ";FRAESEN 5MM\nG0 X50\n")
     assert [t.description for t in extract_tools(text2)] == ["EINSTECHEN", ""]
+
+
+# T12 kommt in KANAL1 und in ABSTECH/UEBERGABE vor (BOESE_300240) -> nur einmal auf Seite 1
+BOESE_300240 = ("%_N_KANAL1_MPF\nT12D1 G96\nG00 X200\n;FERTIGDREHEN DCMT08\nT02D2 G95\n;BOHREN 16\nT08D1\nM17\n"
+                "%_N_KANAL2_MPF\n;FERTIGDREHEN\nT02D1\n;INNENFASE\nT07D1\nM17\n"
+                "%_N_ABSTECH_MPF\nT12D1\nM17\n%_N_UEBERGABE_MPF\nT12D1\nM17\n%_N_ANSCHLAGEN_MPF\nT11D1\nM17\n")
+
+
+def test_same_tool_on_one_side_is_one_row():
+    rows = korrektur_rows(extract_tools(BOESE_300240), SheetData())
+    assert [(r.tool, r.name) for r in rows[1]] == [
+        ("T2 D2", "FERTIGDREHEN DCMT08"), ("T8", "BOHREN 16"), ("T11", "ANSCHLAGEN"),
+        ("T12", "ABSTECH / UEBERGABE")]
+    t12 = rows[1][-1]
+    assert set(t12.keys) == {"1|T12", "0|T12"}
+    # T2 auf Seite 2 ist ein anderes Werkzeug (zweiter Revolver) -> bleibt getrennt
+    assert [(r.tool, r.name) for r in rows[2]] == [("T2", "FERTIGDREHEN"), ("T7", "INNENFASE")]
+
+
+def test_tool_without_comment_borrows_name_on_same_side_only():
+    tools = extract_tools(BOESE_300240)
+    k1_t12 = [t for t in tools if t.side == 1 and t.tool == "T12"][0]
+    assert k1_t12.description == "ABSTECH / UEBERGABE"  # von den Abstech-Programmen (Hauptspindel)
+    text = "%_N_KANAL1_MPF\n;SCHRUPPEN\nT02D1\nM17\n%_N_KANAL2_MPF\nT02D1\nM17\n"
+    assert [(t.side, t.description) for t in extract_tools(text)] == [(1, "SCHRUPPEN"), (2, "")]
+
+
+def test_moving_merged_row_moves_all_parts():
+    d = SheetData()
+    for k in ("1|T12", "0|T12"):
+        d.korrektur[k] = {"side": 2}
+    rows = korrektur_rows(extract_tools(BOESE_300240), d)
+    assert "T12" not in [r.tool for r in rows[1]]
+    assert [r.tool for r in rows[2]].count("T12") == 1

@@ -165,7 +165,27 @@ def extract_tools(text: str) -> List[ToolUse]:
             setup_lines += 1  # z. B. M5 zwischen ";FRAESEN 5MM" und dem Werkzeug
             continue
         pending_comment = ""
-    return _dedupe(result)
+    return _borrow_descriptions(_dedupe(result))
+
+
+def _borrow_descriptions(tools: List[ToolUse]) -> List[ToolUse]:
+    """Werkzeug ohne Kommentar: Bezeichnung von einem anderen Aufruf desselben Werkzeugs übernehmen.
+
+    Nur innerhalb derselben Seite – bei zwei Kanälen sind T2 auf Seite 1 und T2 auf Seite 2
+    verschiedene Werkzeuge (eigener Revolver). Seite 1 nimmt auch Bezeichnungen aus den
+    weiteren Programmen (Abstechen, Anschlag), die zur Hauptspindel gehören.
+    """
+    known: Dict[Tuple[int, str], str] = {}
+    for t in tools:
+        if t.description:
+            known.setdefault((t.side, t.tool), t.description)
+    out = []
+    for t in tools:
+        if not t.description:
+            desc = known.get((t.side, t.tool)) or (known.get((0, t.tool), "") if t.side == 1 else "")
+            t = t._replace(description=desc)
+        out.append(t)
+    return out
 
 
 def _dedupe(tools: List[ToolUse]) -> List[ToolUse]:
@@ -341,13 +361,14 @@ def is_sidecar(name: str) -> bool:
 # --------------------------------------------------------------------------
 
 class KorrRow(NamedTuple):
-    key: str           # "Herkunftsseite|T", z. B. "0|T12"
+    key: str           # Hauptschlüssel "Herkunftsseite|T", z. B. "0|T12" (dort stehen Name/Bemerkung)
     tool: str          # "T12"
     name: str          # Bezeichnung (aus dem Kommentar bzw. selbst geändert)
     remark: str
     side: int          # aktuelle Seite 1 oder 2
     origin: int        # Seite laut Programm (0 = weiteres Programm, z. B. ABSTECH)
     programs: str      # "KANAL1" oder "ABSTECH, UEBERGABE"
+    keys: Tuple[str, ...] = ()  # alle zusammengefassten Schlüssel (z. B. "1|T12" und "0|T12")
 
 
 def _tool_sort_key(tool: str):
@@ -387,12 +408,46 @@ def korrektur_rows(tools: List[ToolUse], data: SheetData) -> Dict[int, List[Korr
         tool_key = _tool_sort_key(acc.tool) if acc.origin == 0 else (0, 0, "")
         return (rank.get(acc.origin, 2), tool_key, acc.pos)
 
-    result: Dict[int, List[KorrRow]] = {1: [], 2: []}
+    # 1) je Herkunft eine Zeile
+    single: List[KorrRow] = []
     for key in sorted(merged, key=sort_key):
         acc = merged[key]
         own = data.korrektur.get(key, {})
         side = own.get("side") if own.get("side") in (1, 2) else (acc.origin if acc.origin in (1, 2) else 1)
         name = str(own["name"]) if own.get("name") is not None else " / ".join(acc.names)
-        result[int(side)].append(KorrRow(key, acc.tool, name, str(own.get("remark", "")), int(side), acc.origin,
-                                         ", ".join(acc.programs)))
+        single.append(KorrRow(key, acc.tool, name, str(own.get("remark", "")), int(side), acc.origin,
+                              ", ".join(acc.programs), (key,)))
+
+    # 2) gleiches Werkzeug auf derselben Seite zu einer Zeile zusammenfassen – z. B. T12 aus
+    #    KANAL1 und T12 aus ABSTECH. Abstechen/Anschlag bleiben hinten auf Seite 1, sonst
+    #    steht die Zeile dort, wo das Werkzeug seine Bezeichnung hat.
+    groups: Dict[Tuple[int, str], List[int]] = {}
+    for i, r in enumerate(single):
+        groups.setdefault((r.side, r.tool), []).append(i)
+    rows: List[Tuple[int, KorrRow]] = []
+    for (side, tool), idxs in groups.items():
+        members = [single[i] for i in idxs]
+        # Abstechen/Anschlag (aus weiteren Programmen) stehen hinten – dort bleibt die Zeile
+        extra = [i for i in idxs if single[i].origin == 0]
+        named = [i for i in idxs if single[i].name]
+        pos = extra[0] if extra else (named[0] if named else idxs[0])
+        primary = single[pos]
+
+        def unique(values):
+            out: List[str] = []
+            for v in values:
+                for part in v.split(" / "):
+                    if part and part not in out:
+                        out.append(part)
+            return out
+
+        overridden = [m.name for m in members if data.korrektur.get(m.key, {}).get("name") is not None]
+        name = overridden[0] if overridden else " / ".join(unique(m.name for m in members))
+        remark = " / ".join(r for r in dict.fromkeys(m.remark for m in members) if r)
+        programs = ", ".join(unique(p for m in members for p in m.programs.split(", ")))
+        rows.append((pos, KorrRow(primary.key, tool, name, remark, side, primary.origin, programs,
+                                  tuple(m.key for m in members))))
+    result: Dict[int, List[KorrRow]] = {1: [], 2: []}
+    for _pos, r in sorted(rows, key=lambda x: x[0]):
+        result[r.side].append(r)
     return result

@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.7.1
+# CNC-Datenübertragung 2.7.2
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -250,7 +250,10 @@ Bezeichnung und ein breites Feld **Bemerkung** zum Eintragen am PC oder mit dem 
 ![Korrekturblatt (Beispiel)](docs/korrekturblatt.png)
 
 - Gleiches Werkzeug auf einer Seite steht nur einmal, z. B. „T2 SCHLICHTEN DCMT04 /
-  GEWINDE M22X1.5“. Korrigiert wird ja pro Werkzeug.
+  GEWINDE M22X1.5“. Korrigiert wird ja pro Werkzeug. Das gilt auch, wenn z. B. T12
+  sowohl in KANAL1 als auch in ABSTECH aufgerufen wird.
+- **Seite 1 und Seite 2 werden nie zusammengefasst:** Bei zwei Kanälen hat jede Seite
+  ihren eigenen Revolver, T2 auf Seite 1 ist also ein anderes Werkzeug als T2 auf Seite 2.
 - **Abstechwerkzeug und Anschlag** (Werkzeuge aus ABSTECH, ANSCHLAGEN …) stehen
   automatisch auf **Seite 1**, hinter den Werkzeugen von Seite 1.
 - **Zeile antippen:** Dort lässt sich die **Seite wechseln** (z. B. Anschlag auf Seite 2),

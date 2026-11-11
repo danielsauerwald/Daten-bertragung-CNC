@@ -477,3 +477,30 @@ def test_correction_sheet_in_dialog(app, tmp_path, monkeypatch):
     app.setup_sheet()
     assert os.path.exists(os.path.join(root, "Metlog", "METLOG_300069_Korrekturblatt.pdf"))
     assert load_sheet(prog).korrektur["0|T11"] == {"side": 2, "name": "ANSCHLAG", "remark": "auf S2 umgebaut"}
+
+
+def test_merged_row_edit_moves_both_parts(app, tmp_path, monkeypatch):
+    """Zusammengefasste Zeile (T12 aus KANAL1 + ABSTECH) wird komplett auf Seite 2 gesetzt."""
+    from cnc_dnc import dialogs
+    from cnc_dnc.setup_dialog import SetupSheetDialog
+    from cnc_dnc.setupsheet import SheetData, extract_tools
+    from cnc_dnc.setupsheet_pdf import SheetContext
+
+    text = ("%_N_KANAL1_MPF\nT12D1 G96\nG00 X200\n;VOR\nT01D1\nM17\n%_N_KANAL2_MPF\n;PLAN\nT02D1\nM17\n"
+            "%_N_ABSTECH_MPF\nT12D1\nM17\n")
+    prog = tmp_path / "B.txt"
+    prog.write_text(text)
+    data = SheetData()
+    d = SetupSheetDialog(app.root, app.fonts, SheetContext("B"), str(prog), extract_tools(text), [], data)
+    s1 = d.korr_trees[1]
+    tools = [s1.item(i, "values")[0] for i in s1.get_children()]
+    assert tools == ["T1", "T12"]
+    iid = s1.get_children()[1]
+    s1.identify_row = lambda y: iid
+    monkeypatch.setattr(dialogs.FormDialog, "show", lambda self: {"side": "Seite 2", "name": "ABSTECH",
+                                                                    "remark": ""})
+    d._edit_korr(s1, type("Tap", (), {"y": 0})())
+    assert [s1.item(i, "values")[0] for i in s1.get_children()] == ["T1"]
+    s2 = d.korr_trees[2]
+    assert [s2.item(i, "values")[0] for i in s2.get_children()].count("T12") == 1
+    d.destroy()
