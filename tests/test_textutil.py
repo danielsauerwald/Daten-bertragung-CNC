@@ -211,12 +211,12 @@ def test_compact_metlog():
     text = load_program_file(METLOG)
     r = compact_program(text)
     out = r.text
-    # nur noch Zweier-Abstände, sonst keine Leerzeilen
-    assert set(_blank_runs(out)) == {2}
+    # vor Werkzeugen 1 Leerzeile, zwischen Programmen 2 – sonst keine Leerzeilen
+    assert set(_blank_runs(out)) == {1, 2}
     # kein Programmtext verloren oder verändert (bis auf Leerzeichen am Zeilenende)
     assert [ln.rstrip() for ln in text.split("\n") if ln.strip()] == [ln for ln in out.split("\n") if ln.strip()]
     # Kommentar bleibt beim Werkzeug, Abstand steht darüber
-    assert "G40 G00 X150 Z130\n\n\n;FERTIGDREHEN VCMT04\nT02D1 G95 G18 S2500 M3 M8\n" in out
+    assert "G40 G00 X150 Z130\n\n;FERTIGDREHEN VCMT04\nT02D1 G95 G18 S2500 M3 M8\n" in out
     # direkt nach dem Programmkopf kein Abstand
     assert out.startswith("%_N_ABSTECH_MPF\n;$PATH=/_N_WKS_DIR/_N_METLOG_300069_WPD\nT12D1")
     assert "%_N_KANAL1_MPF\n;$PATH=/_N_WKS_DIR/_N_METLOG_300069_WPD\n;VORDREHEN VNMG08\nT01D1" in out
@@ -234,8 +234,8 @@ def test_compact_fanuc():
     text = ("%\n\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\n\n\nN20 G54\nN30 T01 M06\n"
             "N40 S2400 M03\n\n(BOHRER)\n\nN100 T05 M06\nN110 M30\n\n%\n")
     out = compact_program(text).text
-    assert out == ("%\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\nN20 G54\n\n\nN30 T01 M06\n"
-                   "N40 S2400 M03\n\n\n(BOHRER)\nN100 T05 M06\nN110 M30\n%\n")
+    assert out == ("%\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\nN20 G54\n\nN30 T01 M06\n"
+                   "N40 S2400 M03\n\n(BOHRER)\nN100 T05 M06\nN110 M30\n%\n")
 
 
 def test_compact_heidenhain_only_removes_blank_lines():

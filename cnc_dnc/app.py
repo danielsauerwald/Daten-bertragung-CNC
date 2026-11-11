@@ -349,7 +349,7 @@ class App:
         self.number_btn = ActionButton(side, f, "Nummerieren …", kind="neutral", compact=True,
                                        command=self.renumber)
         add(self.number_btn)
-        self.setup_btn = ActionButton(side, f, "Einrichteblatt …", kind="neutral", compact=True,
+        self.setup_btn = ActionButton(side, f, "Einricht-/Korrekturblatt", kind="neutral", compact=True,
                                       command=self.setup_sheet)
         add(self.setup_btn, gap=10)
 
@@ -1166,7 +1166,7 @@ class App:
             if res == "saved":
                 self.set_status("✓  Einrichteblatt gespeichert.", "ok")
             else:
-                self.set_status("✓  Einrichteblatt erstellt: " + res, "ok")
+                self.set_status("✓  PDF erstellt: " + res, "ok")
 
     def renumber(self) -> None:
         """Satznummern setzen/entfernen – Schema im Fenster wählbar, rückgängig machbar."""

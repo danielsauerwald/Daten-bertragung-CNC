@@ -10,6 +10,9 @@ from typing import Dict, List
 from . import dialogs
 from .dialogs import Dialog, FormDialog
 from .setupsheet import (
+    KorrRow,
+    korr_pdf_path,
+    korrektur_rows,
     FIELDS,
     Parameter,
     SheetData,
@@ -19,7 +22,7 @@ from .setupsheet import (
     side_title,
     tools_by_side,
 )
-from .setupsheet_pdf import SheetContext, render_setup_sheet
+from .setupsheet_pdf import SheetContext, render_correction_sheet, render_setup_sheet
 from .system import IS_WIN, open_external, toggle_touch_keyboard
 from .theme import C, Fonts, px
 
@@ -29,18 +32,20 @@ class SetupSheetDialog(Dialog):
 
     def __init__(self, parent, fonts: Fonts, ctx: SheetContext, program_path: str, tools: List[ToolUse],
                  params: List[Parameter], data: SheetData) -> None:
-        super().__init__(parent, fonts, "Einrichteblatt – " + ctx.program)
+        super().__init__(parent, fonts, "Einrichte- & Korrekturblatt – " + ctx.program)
         self.ctx = ctx
         self.program_path = program_path
         self.tools = tools
         self.params = params
         self.data = data
         self._rows: Dict[str, ToolUse] = {}
+        self._korr_rows: Dict[str, KorrRow] = {}
         bg = C["bg"]
 
         head = tk.Frame(self, bg=bg)
         head.pack(fill="x", padx=px(self, 20), pady=(px(self, 14), px(self, 6)))
-        tk.Label(head, text="Einrichteblatt  ·  " + ctx.program, bg=bg, fg=C["text"], font=fonts.title).pack(
+        tk.Label(head, text="Einrichte- & Korrekturblatt  ·  " + ctx.program, bg=bg, fg=C["text"],
+                 font=fonts.title).pack(
             anchor="w")
         sub = "  ·  ".join(x for x in (ctx.customer and "Kunde " + ctx.customer, ctx.machine) if x)
         tk.Label(head, text=sub, bg=bg, fg=C["muted"], font=fonts.ui).pack(anchor="w")
@@ -48,17 +53,20 @@ class SetupSheetDialog(Dialog):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=px(self, 16))
         self._build_tools_tab()
+        self._build_korr_tab()
         self._build_part_tab()
         self._build_notes_tab()
         self._build_params_tab()
 
         bar = tk.Frame(self, bg=bg)
         bar.pack(fill="x", padx=px(self, 16), pady=px(self, 12))
-        ttk.Button(bar, text="PDF erstellen & öffnen", style="Primary.TButton", command=self.make_pdf).pack(
-            side="right")
+        ttk.Button(bar, text="Einrichteblatt-PDF", style="Primary.TButton",
+                   command=lambda: self.make_pdf("setup")).pack(side="right")
+        ttk.Button(bar, text="Korrekturblatt-PDF", style="Primary.TButton",
+                   command=lambda: self.make_pdf("korr")).pack(side="right", padx=(0, px(self, 12)))
         ttk.Button(bar, text="Speichern", command=self.save_only).pack(side="right", padx=(0, px(self, 12)))
         ttk.Button(bar, text="Abbrechen", command=self.cancel).pack(side="right", padx=(0, px(self, 12)))
-        tk.Label(bar, text="Eingaben werden neben dem Programm gespeichert und beim nächsten Mal wieder angezeigt.",
+        tk.Label(bar, text="Eingaben bleiben neben dem Programm gespeichert.",
                  bg=bg, fg=C["muted"], font=fonts.small).pack(side="left")
 
     # -- Werkzeuge ---------------------------------------------------------------
@@ -123,6 +131,82 @@ class SetupSheetDialog(Dialog):
         if res is not None:
             tree.item(iid, values=(tool, res["desc"], res["remark"]))
             self.data.set_tool(t, res["desc"], res["remark"])
+            if hasattr(self, "korr_trees"):
+                self._fill_korr()  # Bezeichnung auch im Korrekturblatt
+
+    # -- Korrekturblatt ------------------------------------------------------------
+
+    def _build_korr_tab(self) -> None:
+        f = tk.Frame(self.nb, bg=C["surface"], padx=px(self, 14), pady=px(self, 12))
+        self.nb.add(f, text="Korrekturblatt")
+        tk.Label(f, text="Seite 1 links, Seite 2 rechts. Abstechwerkzeug und Anschlag stehen automatisch auf "
+                         "Seite 1. Zeile antippen: Seite wechseln, Namen ändern oder Bemerkung eintragen.",
+                 bg=C["surface"], fg=C["muted"], font=self.fonts.ui, anchor="w", justify="left",
+                 wraplength=px(self, 1100)).pack(anchor="w", pady=(0, px(self, 8)))
+        cols = tk.Frame(f, bg=C["surface"])
+        cols.pack(fill="both", expand=True)
+        self.korr_trees: Dict[int, ttk.Treeview] = {}
+        self.korr_titles: Dict[int, tk.Label] = {}
+        for i, side in enumerate((1, 2)):
+            cols.grid_columnconfigure(i, weight=1, uniform="korr")
+            cols.grid_rowconfigure(1, weight=1)
+            pad = (0 if i == 0 else px(self, 12), 0)
+            cap = tk.Frame(cols, bg=C["header"])
+            cap.grid(row=0, column=i, sticky="ew", padx=pad)
+            tk.Label(cap, text="SEITE {}".format(side), bg=C["header"], fg="#FFFFFF", font=self.fonts.ui_bold).pack(
+                side="left", padx=px(self, 8), pady=px(self, 6))
+            count = tk.Label(cap, text="", bg=C["header"], fg=C["header_muted"], font=self.fonts.small)
+            count.pack(side="right", padx=px(self, 8))
+            self.korr_titles[side] = count
+            box = tk.Frame(cols, bg=C["surface"], highlightthickness=1, highlightbackground=C["border"])
+            box.grid(row=1, column=i, sticky="nsew", padx=pad)
+            tree = ttk.Treeview(box, columns=("tool", "name", "remark"), show="headings", selectmode="browse",
+                                height=7)
+            tree.heading("tool", text="T", anchor="center")
+            tree.heading("name", text="WERKZEUG", anchor="w")
+            tree.heading("remark", text="BEMERKUNG", anchor="w")
+            tree.column("tool", width=px(self, 52), anchor="center", stretch=False)
+            tree.column("name", width=px(self, 250), anchor="w", stretch=True)
+            tree.column("remark", width=px(self, 200), anchor="w", stretch=True)
+            sb = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            tree.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            tree.bind("<ButtonRelease-1>", lambda ev, tr=tree: self._edit_korr(tr, ev))
+            self.korr_trees[side] = tree
+        self._fill_korr()
+
+    def _fill_korr(self) -> None:
+        rows = korrektur_rows(self.tools, self.data)
+        self._korr_rows = {}
+        for side, tree in self.korr_trees.items():
+            tree.delete(*tree.get_children())
+            for r in rows[side]:
+                iid = tree.insert("", "end", values=(r.tool, r.name, r.remark))
+                self._korr_rows[str(tree) + iid] = r
+            n = len(rows[side])
+            text = "{} Werkzeuge".format(n) if n != 1 else "1 Werkzeug"
+            if n > 12:
+                text += "  ·  mehr als 12 – Zeilen werden enger"
+            self.korr_titles[side].configure(text=text)
+
+    def _edit_korr(self, tree: ttk.Treeview, event) -> None:
+        iid = tree.identify_row(event.y)
+        r = self._korr_rows.get(str(tree) + iid) if iid else None
+        if r is None:
+            return
+        res = FormDialog(self, self.fonts, "Korrekturblatt: {}".format(r.tool),
+                         [("side", "Seite", "Seite {}".format(r.side), ("Seite 1", "Seite 2")),
+                          ("name", "Werkzeug", r.name), ("remark", "Bemerkung", r.remark)],
+                         message="Aus dem Programm: {}".format(r.programs or "–")).show()
+        if res is None:
+            return
+        entry = self.data.korrektur.setdefault(r.key, {})
+        entry["side"] = 2 if res["side"] == "Seite 2" else 1
+        if res["name"] != r.name or "name" in entry:
+            entry["name"] = res["name"]
+        entry["remark"] = res["remark"]
+        self._fill_korr()
 
     # -- Teil & Spannung ---------------------------------------------------------
 
@@ -213,12 +297,15 @@ class SetupSheetDialog(Dialog):
         self.result = "saved"
         self.destroy()
 
-    def make_pdf(self) -> None:
+    def make_pdf(self, kind: str = "setup") -> None:
         self._collect()
-        target = pdf_path(self.program_path)
+        target = korr_pdf_path(self.program_path) if kind == "korr" else pdf_path(self.program_path)
         try:
             save_sheet(self.program_path, self.data)
-            render_setup_sheet(target, self.ctx, self.tools, self.params, self.data)
+            if kind == "korr":
+                render_correction_sheet(target, self.ctx, korrektur_rows(self.tools, self.data), self.data)
+            else:
+                render_setup_sheet(target, self.ctx, self.tools, self.params, self.data)
         except OSError as exc:
             hint = "Ist die PDF vielleicht noch in einem anderen Programm geöffnet?" \
                 if "denied" in str(exc).lower() or "zugriff" in str(exc).lower() else ""

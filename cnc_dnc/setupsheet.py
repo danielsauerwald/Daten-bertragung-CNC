@@ -26,6 +26,7 @@ from .textutil import (
 
 SIDECAR_SUFFIX = ".einrichteblatt.json"
 PDF_SUFFIX = "_Einrichteblatt.pdf"
+KORR_PDF_SUFFIX = "_Korrekturblatt.pdf"
 
 # Programmname → Seite: KANAL1, KANAL_2, SEITE1, CHAN2, S1 …
 _SIDE_FROM_NAME = re.compile(r"(?:^|_)(?:KANAL|KAN|CHAN|SEITE|S)_?([12])$", re.IGNORECASE)
@@ -248,6 +249,8 @@ class SheetData:
         self.fields: Dict[str, str] = {k: "" for k, _, _ in FIELDS}
         self.notes = ""
         self.tools: Dict[str, Dict[str, str]] = {}  # key -> {"description":…, "remark":…}
+        # Korrekturblatt: je Werkzeug (Schlüssel "Herkunftsseite|T") Seite, Name, Bemerkung
+        self.korrektur: Dict[str, Dict[str, object]] = {}
 
     def tool_entry(self, t: ToolUse) -> Dict[str, str]:
         """Gespeicherte Eingaben zu einem Werkzeug – passend auch, wenn sich der Kommentar geändert hat."""
@@ -266,7 +269,7 @@ class SheetData:
 
     def to_json(self) -> dict:
         return {"version": 1, "updated": datetime.datetime.now().isoformat(timespec="seconds"),
-                "fields": self.fields, "notes": self.notes, "tools": self.tools}
+                "fields": self.fields, "notes": self.notes, "tools": self.tools, "korrektur": self.korrektur}
 
     @classmethod
     def from_json(cls, data: dict) -> "SheetData":
@@ -280,6 +283,18 @@ class SheetData:
             if isinstance(tools, dict):
                 sd.tools = {str(k): {"description": str(v.get("description", "")), "remark": str(v.get("remark", ""))}
                             for k, v in tools.items() if isinstance(v, dict)}
+            korr = data.get("korrektur") or {}
+            if isinstance(korr, dict):
+                for k, v in korr.items():
+                    if not isinstance(v, dict):
+                        continue
+                    entry: Dict[str, object] = {}
+                    if v.get("side") in (1, 2):
+                        entry["side"] = int(v["side"])
+                    for f in ("name", "remark"):
+                        if v.get(f) is not None:
+                            entry[f] = str(v[f])
+                    sd.korrektur[str(k)] = entry
         return sd
 
 
@@ -289,6 +304,10 @@ def sidecar_path(program_path: str) -> str:
 
 def pdf_path(program_path: str) -> str:
     return os.path.splitext(program_path)[0] + PDF_SUFFIX
+
+
+def korr_pdf_path(program_path: str) -> str:
+    return os.path.splitext(program_path)[0] + KORR_PDF_SUFFIX
 
 
 def load_sheet(program_path: str) -> SheetData:
@@ -309,3 +328,64 @@ def save_sheet(program_path: str, data: SheetData) -> None:
 
 def is_sidecar(name: str) -> bool:
     return name.lower().endswith(SIDECAR_SUFFIX)
+
+# --------------------------------------------------------------------------
+# Korrekturblatt: je Seite eine Zeile pro Werkzeug
+# --------------------------------------------------------------------------
+
+class KorrRow(NamedTuple):
+    key: str           # "Herkunftsseite|T", z. B. "0|T12"
+    tool: str          # "T12"
+    name: str          # Bezeichnung (aus dem Kommentar bzw. selbst geändert)
+    remark: str
+    side: int          # aktuelle Seite 1 oder 2
+    origin: int        # Seite laut Programm (0 = weiteres Programm, z. B. ABSTECH)
+    programs: str      # "KANAL1" oder "ABSTECH, UEBERGABE"
+
+
+def _tool_sort_key(tool: str):
+    m = re.match(r"T(\d+)", tool)
+    return (0, int(m.group(1)), tool) if m else (1, 0, tool)
+
+
+def korrektur_rows(tools: List[ToolUse], data: SheetData) -> Dict[int, List[KorrRow]]:
+    """Werkzeuge für das Korrekturblatt.
+
+    - Gleiches Werkzeug auf derselben Seite nur einmal (Bezeichnungen zusammengefasst),
+      denn korrigiert wird pro Werkzeug.
+    - Werkzeuge aus weiteren Programmen (Abstechen, Anschlag …) stehen auf Seite 1.
+    - Eigene Änderungen (andere Seite, Name, Bemerkung) aus ``data.korrektur``.
+    """
+    class _Acc:
+        def __init__(self, tool: str, origin: int, pos: int) -> None:
+            self.tool, self.origin, self.pos = tool, origin, pos
+            self.names: List[str] = []
+            self.programs: List[str] = []
+
+    merged: Dict[str, _Acc] = {}
+    for t in tools:
+        key = "{}|{}".format(t.side, t.tool)
+        acc = merged.setdefault(key, _Acc(t.tool, t.side, len(merged)))
+        desc = data.tool_entry(t)["description"]
+        if desc and desc not in acc.names:
+            acc.names.append(desc)
+        if t.program and t.program not in acc.programs:
+            acc.programs.append(t.program)
+
+    # Reihenfolge: Seite 1 wie im Programm, Seite 2 wie im Programm, weitere nach T-Nummer
+    rank = {1: 0, 2: 1, 0: 2}
+
+    def sort_key(key: str):
+        acc = merged[key]
+        tool_key = _tool_sort_key(acc.tool) if acc.origin == 0 else (0, 0, "")
+        return (rank.get(acc.origin, 2), tool_key, acc.pos)
+
+    result: Dict[int, List[KorrRow]] = {1: [], 2: []}
+    for key in sorted(merged, key=sort_key):
+        acc = merged[key]
+        own = data.korrektur.get(key, {})
+        side = own.get("side") if own.get("side") in (1, 2) else (acc.origin if acc.origin in (1, 2) else 1)
+        name = str(own["name"]) if own.get("name") is not None else " / ".join(acc.names)
+        result[int(side)].append(KorrRow(key, acc.tool, name, str(own.get("remark", "")), int(side), acc.origin,
+                                         ", ".join(acc.programs)))
+    return result

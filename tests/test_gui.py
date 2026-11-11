@@ -338,7 +338,7 @@ def test_compact_button_and_undo(app):
     app.compact()
     app.root.update()
     text = app.editor.get_text()
-    assert "\n\n\n\n" not in text and "G40 G00 X150 Z130\n\n\n;FERTIGDREHEN VCMT04\n" in text
+    assert "\n\n\n\n" not in text and "G40 G00 X150 Z130\n\n;FERTIGDREHEN VCMT04\n" in text
     assert app.dirty
     assert "Zusammengerückt" in app.status_text.cget("text")
     # ein Tipp auf "Rückgängig" holt den alten Stand komplett zurück
@@ -439,3 +439,41 @@ def test_renumber_button_flow(app, monkeypatch):
     app.undo()
     app.root.update()
     assert app.editor.get_text() == original
+
+
+def test_correction_sheet_in_dialog(app, tmp_path, monkeypatch):
+    import cnc_dnc.setup_dialog as sd_mod
+    from cnc_dnc import dialogs
+    from cnc_dnc.setup_dialog import SetupSheetDialog
+    from cnc_dnc.setupsheet import load_sheet
+
+    root = str(tmp_path / "Emco-2")
+    os.makedirs(os.path.join(root, "Metlog"))
+    app.machine.folder = root
+    app.apply_machine(connect=False)
+    prog = os.path.join(root, "Metlog", "METLOG_300069.txt")
+    with open(os.path.join(os.path.dirname(__file__), "data", "METLOG_300069.txt"), "rb") as a, \
+            open(prog, "wb") as b:
+        b.write(a.read())
+    app.open_file(prog)
+    monkeypatch.setattr(sd_mod, "open_external", lambda p: True)
+    # Anschlag (T11) im Formular auf Seite 2 setzen
+    monkeypatch.setattr(dialogs.FormDialog, "show",
+                        lambda self: {"side": "Seite 2", "name": "ANSCHLAG", "remark": "auf S2 umgebaut"})
+
+    def fake_show(self):
+        s1 = self.korr_trees[1]
+        tools = [s1.item(i, "values")[0] for i in s1.get_children()]
+        assert tools[-2:] == ["T11", "T12"]  # Anschlag und Abstechen auf Seite 1
+        iid = s1.get_children()[tools.index("T11")]
+        s1.identify_row = lambda y: iid  # Antippen der Zeile T11 simulieren
+        self._edit_korr(s1, type("Tap", (), {"y": 0})())
+        s2 = self.korr_trees[2]
+        assert [s2.item(i, "values")[0] for i in s2.get_children()][-1] == "T11"
+        self.make_pdf("korr")
+        return self.result
+
+    monkeypatch.setattr(SetupSheetDialog, "show", fake_show)
+    app.setup_sheet()
+    assert os.path.exists(os.path.join(root, "Metlog", "METLOG_300069_Korrekturblatt.pdf"))
+    assert load_sheet(prog).korrektur["0|T11"] == {"side": 2, "name": "ANSCHLAG", "remark": "auf S2 umgebaut"}

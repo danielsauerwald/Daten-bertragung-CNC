@@ -828,8 +828,9 @@ def ask_text(parent, fonts: Fonts, title: str, message: str, initial: str = "") 
 class FormDialog(Dialog):
     """Kleines Formular mit mehreren Textfeldern, z. B. Bearbeitung + Bemerkung eines Werkzeugs."""
 
-    def __init__(self, parent, fonts: Fonts, title: str, fields: Sequence[Tuple[str, str, str]],
+    def __init__(self, parent, fonts: Fonts, title: str, fields: Sequence[tuple],
                  message: str = "") -> None:
+        """``fields``: (Schlüssel, Beschriftung, Wert) oder (…, Auswahlliste) für ein Auswahlfeld."""
         super().__init__(parent, fonts, title)
         self.resizable(False, False)
         bg = C["surface"]
@@ -846,16 +847,23 @@ class FormDialog(Dialog):
             row = 2
         self.vars: Dict[str, tk.StringVar] = {}
         first = None
-        for key, label, value in fields:
+        for field in fields:
+            key, label, value = field[0], field[1], field[2]
+            choices = field[3] if len(field) > 3 else None
             tk.Label(body, text=label, bg=bg, fg=C["text"], font=fonts.ui, anchor="w").grid(
                 row=row, column=0, sticky="w", padx=(0, px(self, 14)), pady=px(self, 6))
-            var = tk.StringVar(value=value)
+            var = tk.StringVar(master=self, value=value)
+            self.vars[key] = var
+            if choices:
+                ttk.Combobox(body, textvariable=var, values=list(choices), state="readonly", font=fonts.title,
+                             width=14).grid(row=row, column=1, sticky="w", pady=px(self, 6))
+                row += 1
+                continue
             e = ttk.Entry(body, textvariable=var, font=fonts.title, width=34)
             e.grid(row=row, column=1, sticky="ew", pady=px(self, 6))
             if IS_WIN:
                 ttk.Button(body, text="⌨", style="Small.TButton", width=3, command=toggle_touch_keyboard).grid(
                     row=row, column=2, padx=(px(self, 8), 0))
-            self.vars[key] = var
             first = first or e
             row += 1
         bar = tk.Frame(self, bg=C["bg"])

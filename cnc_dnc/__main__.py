@@ -93,6 +93,13 @@ def main(argv=None) -> int:
         render_setup_sheet(pdf, SheetContext("SELBSTTEST", "Maschine", "Kunde", "x.txt"),
                            extract_tools(sample), [], SheetData())
         assert open(pdf, "rb").read(8) == b"%PDF-1.4"
+        from .setupsheet import korrektur_rows
+        from .setupsheet_pdf import render_correction_sheet
+
+        korr = os.path.join(os.path.dirname(cfg_path), "selbsttest_korrektur.pdf")
+        render_correction_sheet(korr, SheetContext("SELBSTTEST", "Maschine", "Kunde", "x.txt"),
+                                korrektur_rows(extract_tools(sample), SheetData()), SheetData())
+        assert open(korr, "rb").read(8) == b"%PDF-1.4"
         # Satznummern: Modul vorhanden und Zyklus-Verweise werden mitgeführt
         from .numbering import renumber
         from .numbering_dialog import RenumberDialog  # noqa: F401

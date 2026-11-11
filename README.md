@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.6
+# CNC-Datenübertragung 2.7
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -33,12 +33,14 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
   (z. B. ABSTECH, KANAL1, KANAL2 … in einem Sinumerik-Werkstück), springt man über
   „≡ 8 Programme ▾“ direkt dorthin.
 - **Kundenordner wird beim Speichern vorgeschlagen**, siehe [Kundenordner](#kundenordner).
-- **Zusammenrücken** auf Knopfdruck: Leerzeilen raus, vor jedem Werkzeug zwei Leerzeilen,
+- **Zusammenrücken** auf Knopfdruck: Leerzeilen raus, vor jedem Werkzeug eine Leerzeile,
   siehe [Zusammenrücken](#zusammenrücken).
 - **Satznummern** auf Knopfdruck: pro Werkzeug (N1000, N2000 …), durchgehend, nur an
   Werkzeugwechseln oder entfernen, siehe [Nummerieren](#nummerieren).
 - **Einrichteblatt als PDF**: Werkzeuge nach Seite 1 / Seite 2 mit dem Kommentar aus dem
   Programm, dazu Spanndruck, Teil und Notizen, siehe [Einrichteblatt](#einrichteblatt).
+- **Korrekturblatt als PDF**: Seite 1 links, Seite 2 rechts, je Werkzeug viel Platz für
+  Bemerkungen, siehe [Korrekturblatt](#korrekturblatt).
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
 - **LEDs für die Steuerleitungen** CTS, DSR, CD und RI sowie TX/RX, wie im alten Programm.
 - **Warnung vor Sonderzeichen** (ä, ö, ü, Ø …), die viele Steuerungen mit Alarm ablehnen.
@@ -158,11 +160,11 @@ Die Taste **Zusammenrücken** (rechts unter „BEARBEITEN“) räumt das Program
 
 - **Alle Leerzeilen werden entfernt**, ebenso Leerzeichen am Zeilenende. Leerzeichen
   *innerhalb* einer Zeile (`G01 X10 Z-5`) bleiben, die braucht die Steuerung.
-- **Vor jedem Werkzeugaufruf stehen danach genau zwei Leerzeilen.** Als Werkzeugaufruf
+- **Vor jedem Werkzeugaufruf steht danach genau eine Leerzeile.** Als Werkzeugaufruf
   zählen z. B. `T12D1`, `N30 T01 M06`, `T="BOHRER"` und `TOOL CALL`, nicht aber ein
   Kommentar wie `(WERKZEUG T01)`.
 - **Kommentarzeilen direkt über dem Werkzeug** (z. B. `;FERTIGDREHEN VCMT04`) bleiben
-  beim Werkzeug. Die zwei Leerzeilen kommen über den Kommentar.
+  beim Werkzeug. Die Leerzeile kommt über den Kommentar.
 - **Direkt nach einem Programmkopf** (`%_N_…_MPF`, `;$PATH=…`, `O1234`) kommt kein Abstand.
 - **Mehrere Programme in einer Datei** (Sinumerik-Werkstück) bleiben durch zwei
   Leerzeilen vor jedem weiteren `%_N_…`-Kopf getrennt.
@@ -196,7 +198,8 @@ wählt man das Schema und sieht vorher eine Vorschau:
 
 ## Einrichteblatt
 
-Die Taste **Einrichteblatt …** (rechts unter „BEARBEITEN“) erstellt ein Einrichteblatt als PDF,
+Die Taste **Einricht-/Korrekturblatt** (rechts unter „BEARBEITEN“) öffnet ein Fenster für
+beide Blätter. **Einrichteblatt-PDF** erstellt das Einrichteblatt als PDF,
 das auf eine A4-Seite passt. Man kann es ausdrucken, an die Maschine hängen oder einfach
 als Datei beim Programm lassen.
 
@@ -225,6 +228,26 @@ zum Nachtragen mit dem Stift.
 **Dateien:** Neben `METLOG_300069.txt` entstehen `METLOG_300069_Einrichteblatt.pdf` (wird in
 der Dateiliste angezeigt, Antippen öffnet sie im PDF-Programm) und
 `METLOG_300069.einrichteblatt.json` mit den eigenen Eingaben (in der Liste ausgeblendet).
+
+## Korrekturblatt
+
+Im selben Fenster gibt es den Reiter **Korrekturblatt** und unten die Taste
+**Korrekturblatt-PDF**. Das Blatt ist A4 hoch: **Seite 1 links, Seite 2 rechts**. Jede Seite
+hat 12 große Zeilen, also Platz für die meisten Maschinen. Jede Zeile enthält Werkzeug,
+Bezeichnung und ein breites Feld **Bemerkung** zum Eintragen am PC oder mit dem Stift.
+
+![Korrekturblatt (Beispiel)](docs/korrekturblatt.png)
+
+- Gleiches Werkzeug auf einer Seite steht nur einmal, z. B. „T2 SCHLICHTEN DCMT04 /
+  GEWINDE M22X1.5“. Korrigiert wird ja pro Werkzeug.
+- **Abstechwerkzeug und Anschlag** (Werkzeuge aus ABSTECH, ANSCHLAGEN …) stehen
+  automatisch auf **Seite 1**, hinter den Werkzeugen von Seite 1.
+- **Zeile antippen:** Dort lässt sich die **Seite wechseln** (z. B. Anschlag auf Seite 2),
+  die Bezeichnung ändern oder eine Bemerkung eintragen. Das wird gespeichert und beim nächsten
+  Mal wieder so angezeigt.
+- Hat eine Seite mehr als 12 Werkzeuge, werden die Zeilen etwas enger.
+
+Die Datei heißt z. B. `METLOG_300069_Korrekturblatt.pdf` und liegt neben dem Programm.
 
 ## Warum sind die Zeilen früher verrutscht?
 

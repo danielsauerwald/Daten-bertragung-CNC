@@ -6,8 +6,8 @@ import datetime
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .pdfwriter import A4, PdfDocument, fit_text, hex_color, wrap_text
-from .setupsheet import Parameter, SheetData, ToolUse, side_title, tools_by_side
+from .pdfwriter import A4, PdfDocument, fit_text, hex_color, string_width, wrap_text
+from .setupsheet import KorrRow, Parameter, SheetData, ToolUse, side_title, tools_by_side
 
 DARK = hex_color("#18222E")
 PRIMARY = hex_color("#1C64D8")
@@ -34,9 +34,10 @@ class SheetContext:
 
 
 class _Layout:
-    def __init__(self, doc: PdfDocument, ctx: SheetContext) -> None:
+    def __init__(self, doc: PdfDocument, ctx: SheetContext, label: str = "EINRICHTEBLATT") -> None:
         self.doc = doc
         self.ctx = ctx
+        self.label = label
         self.y = M
         self._on_new_page = None
 
@@ -47,8 +48,8 @@ class _Layout:
         self.doc.new_page()
         self.y = M
         d = self.doc
-        d.text(M, self.y + 12, "EINRICHTEBLATT", 8, bold=True, color=MUTED)
-        d.text(M + 92, self.y + 12, self.ctx.program + "  (Fortsetzung)", 10, bold=True, color=TEXT)
+        d.text(M, self.y + 12, self.label, 8, bold=True, color=MUTED)
+        d.text(M + 98, self.y + 12, self.ctx.program + "  (Fortsetzung)", 10, bold=True, color=TEXT)
         d.line(M, self.y + 20, W - M, self.y + 20, 0.6, GRID)
         self.y += 30
         if self._on_new_page:
@@ -77,7 +78,7 @@ def _draw_header(lay: _Layout) -> None:
     d, ctx = lay.doc, lay.ctx
     h = 56.0
     d.rect(M, lay.y, W - 2 * M, h, fill=DARK)
-    d.text(M + 14, lay.y + 19, "EINRICHTEBLATT", 8.5, bold=True, color=FAINT)
+    d.text(M + 14, lay.y + 19, lay.label, 8.5, bold=True, color=FAINT)
     name, size = fit_text(ctx.program or "Programm", 300, 22, bold=True, min_size=12)
     d.text(M + 14, lay.y + 43, name, size, bold=True, color=WHITE)
     rows = [("Maschine", ctx.machine), ("Kunde", ctx.customer),
@@ -240,14 +241,14 @@ def _draw_notes(lay: _Layout, notes: str) -> None:
         lay.y += line_h
 
 
-def _draw_footers(doc: PdfDocument, ctx: SheetContext) -> None:
+def _draw_footers(doc: PdfDocument, ctx: SheetContext, label: str = "Einrichteblatt") -> None:
     n = len(doc.pages)
     for i in range(n):
         doc.set_page(i)
         y = H - 20
         doc.line(M, y - 10, W - M, y - 10, 0.4, GRID)
-        doc.text(M, y, "Einrichteblatt {}  ·  erstellt mit CNC-Datenübertragung  ·  {}".format(
-            ctx.program, ctx.created.strftime("%d.%m.%Y")), 7, color=MUTED)
+        doc.text(M, y, "{} {}  ·  erstellt mit CNC-Datenübertragung  ·  {}".format(
+            label, ctx.program, ctx.created.strftime("%d.%m.%Y")), 7, color=MUTED)
         doc.text(W - M, y, "Seite {} von {}".format(i + 1, n), 7, color=MUTED, align="right")
 
 
@@ -287,6 +288,97 @@ def render_setup_sheet(path: str, ctx: SheetContext, tools: List[ToolUse], param
         _draw_parameters(lay, params)
     _draw_notes(lay, data.notes)
     _draw_footers(doc, ctx)
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    doc.save(path)
+
+
+# --------------------------------------------------------------------------
+# Korrekturblatt: Seite 1 links, Seite 2 rechts, viel Platz für Bemerkungen
+# --------------------------------------------------------------------------
+
+def _wrap_lines(text: str, width: float, size: float, bold: bool, max_lines: int) -> List[str]:
+    lines = []
+    for ln in wrap_text(text, width, size, bold):
+        lines.append(fit_text(ln, width, size, bold, min_size=size)[0])
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = fit_text(lines[-1] + " …", width, size, bold, min_size=size)[0]
+    return lines
+
+
+def render_correction_sheet(path: str, ctx: SheetContext, rows: Dict[int, List[KorrRow]], data: SheetData,
+                            min_rows: int = 12) -> None:
+    """A4 hoch: zwei Spalten (Seite 1 | Seite 2), je Werkzeug eine hohe Zeile mit Bemerkungsfeld."""
+    doc = PdfDocument(title="Korrekturblatt " + ctx.program)
+    lay = _Layout(doc, ctx, label="KORREKTURBLATT")
+    _draw_header(lay)
+    f = data.fields
+    info = [(lbl, f.get(key, "")) for lbl, key in (("Teil", "teil"), ("Zeichnungs-Nr.", "zeichnung"),
+                                                   ("Material", "material"))]
+    info = [(lbl, v) for lbl, v in info if v]
+    if info:
+        x = M
+        for lbl, v in info:
+            doc.text(x, lay.y + 8, lbl, 7.5, color=MUTED)
+            lw = string_width(lbl, 7.5) + 6
+            vv, size = fit_text(v, 170 - lw, 9.5, bold=True)
+            doc.text(x + lw, lay.y + 8, vv, size, bold=True, color=TEXT)
+            x += 175
+        lay.y += 18
+
+    gap = 14.0
+    colw = (W - 2 * M - gap) / 2
+    tool_w = 104.0
+    rem_w = colw - tool_w
+    n = max(min_rows, len(rows.get(1, [])), len(rows.get(2, [])))
+    head_h = 24.0 + 16.0
+    avail = BOTTOM - lay.y - head_h
+    row_h = max(30.0, min(58.0, avail / n))
+
+    def subtitle(side: int) -> str:
+        progs = []
+        for r in rows.get(side, []):
+            for p in r.programs.split(", "):
+                if p and p not in progs:
+                    progs.append(p)
+        return ", ".join(progs)
+
+    def heads() -> None:
+        for i, side in enumerate((1, 2)):
+            x = M + i * (colw + gap)
+            doc.rect(x, lay.y, colw, 24, fill=DARK)
+            doc.text(x + 8, lay.y + 16.5, "SEITE {}".format(side), 12, bold=True, color=WHITE)
+            sub_t, size = fit_text(subtitle(side), colw - 90, 7.5)
+            doc.text(x + colw - 8, lay.y + 16, sub_t, size, color=FAINT, align="right")
+            lay.cell(x, lay.y + 24, tool_w, 16, "Werkzeug", 7.5, bold=True, bg=HEAD_BG, color=MUTED)
+            lay.cell(x + tool_w, lay.y + 24, rem_w, 16, "Bemerkung", 7.5, bold=True, bg=HEAD_BG, color=MUTED)
+        lay.y += head_h
+
+    heads()
+    lay._on_new_page = heads
+    name_size = 8.0
+    for i in range(n):
+        lay.ensure(row_h)
+        for c, side in enumerate((1, 2)):
+            x = M + c * (colw + gap)
+            doc.rect(x, lay.y, tool_w, row_h, stroke=GRID, width=0.6)
+            doc.rect(x + tool_w, lay.y, rem_w, row_h, stroke=GRID, width=0.6)
+            side_rows = rows.get(side, [])
+            if i >= len(side_rows):
+                continue
+            r = side_rows[i]
+            doc.text(x + 8, lay.y + 18, r.tool, 15, bold=True, color=TEXT)
+            max_lines = max(1, int((row_h - 24) // 9.5))
+            for k, ln in enumerate(_wrap_lines(r.name, tool_w - 14, name_size, False, max_lines)):
+                doc.text(x + 8, lay.y + 30 + k * 9.5, ln, name_size, color=MUTED)
+            if r.remark:
+                rem_lines = max(1, int((row_h - 8) // 11))
+                for k, ln in enumerate(_wrap_lines(r.remark, rem_w - 12, 9.5, False, rem_lines)):
+                    doc.text(x + tool_w + 6, lay.y + 14 + k * 11, ln, 9.5, color=PRIMARY)
+        lay.y += row_h
+    lay._on_new_page = None
+    _draw_footers(doc, ctx, "Korrekturblatt")
     folder = os.path.dirname(os.path.abspath(path))
     os.makedirs(folder, exist_ok=True)
     doc.save(path)

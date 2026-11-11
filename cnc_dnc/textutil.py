@@ -427,8 +427,10 @@ class CompactResult:
         self.tools = tools                # gefundene Werkzeugaufrufe
 
 
-def compact_program(text: str, blank_lines: int = 2, dialect: Optional[str] = None) -> CompactResult:
-    """Leerzeilen entfernen, nur vor Werkzeugaufrufen ``blank_lines`` Leerzeilen lassen.
+def compact_program(text: str, tool_blank_lines: int = 1, program_blank_lines: int = 2,
+                    dialect: Optional[str] = None) -> CompactResult:
+    """Leerzeilen entfernen; vor Werkzeugaufrufen ``tool_blank_lines`` (1) Leerzeile,
+    vor jedem weiteren Programm einer Datei ``program_blank_lines`` (2) Leerzeilen.
 
     - Kommentarzeilen direkt über einem Werkzeug (z. B. ``;FERTIGDREHEN VCMT04``)
       gehören zum Werkzeug – der Abstand kommt über den Kommentar.
@@ -440,14 +442,13 @@ def compact_program(text: str, blank_lines: int = 2, dialect: Optional[str] = No
     - Leerzeichen am Zeilenende werden entfernt, Leerzeichen innerhalb der Zeile nicht.
     """
     if dialect == "heidenhain":
-        blank_lines = 0
+        tool_blank_lines = program_blank_lines = 0
     norm = normalize_text(text, strip_control=False)
     ends_with_newline = norm.endswith("\n")
     lines = [ln.rstrip() for ln in norm.split("\n")]
     if ends_with_newline:
         lines.pop()
     removed = sum(1 for ln in lines if not ln.strip())
-    gap = [""] * blank_lines
 
     out: List[str] = []
     gaps = {"tool": 0, "program": 0}
@@ -456,9 +457,10 @@ def compact_program(text: str, blank_lines: int = 2, dialect: Optional[str] = No
     header_zone = True    # direkt nach Programmanfang/-kopf: kein Abstand
 
     def insert_gap(position: int, kind: str) -> None:
-        if not blank_lines:
+        n = tool_blank_lines if kind == "tool" else program_blank_lines
+        if n <= 0:
             return
-        out[position:position] = gap
+        out[position:position] = [""] * n
         gaps[kind] += 1
 
     for ln in lines:

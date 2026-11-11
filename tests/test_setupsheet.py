@@ -102,3 +102,56 @@ def test_pdf_is_valid_and_contains_the_sheet(tmp_path):
     for needle in (b"(METLOG_300069)", b"(SEITE 1)", b"(SEITE 2)", b"(VORDREHEN VNMG08)", b"(25 bar)",
                    b"(DURCHMESSER STANGE)", b"(St\xfcckzahl)"):
         assert needle in content, needle
+
+
+# --------------------------------------------------------------------------
+# Korrekturblatt
+# --------------------------------------------------------------------------
+
+from cnc_dnc.setupsheet import korrektur_rows  # noqa: E402
+from cnc_dnc.setupsheet_pdf import render_correction_sheet  # noqa: E402
+
+
+def test_korrektur_rows_parting_and_stop_on_side_one():
+    tools = extract_tools(load_program_file(METLOG))
+    rows = korrektur_rows(tools, SheetData())
+    assert [(r.tool, r.name) for r in rows[1]] == [
+        ("T1", "VORDREHEN VNMG08"), ("T2", "FERTIGDREHEN VCMT04"), ("T3", "BOHREN 12"),
+        ("T8", "INNEN ECOCUT 10"), ("T10", "GEWINDEBOHREN M14LH"),
+        ("T11", "ANSCHLAGEN"), ("T12", "ABSTECH / UEBERGABE")]
+    # gleiches Werkzeug auf einer Seite nur einmal (korrigiert wird pro Werkzeug)
+    assert [(r.tool, r.name) for r in rows[2]] == [
+        ("T2", "SCHLICHTEN DCMT04 / GEWINDE M22X1.5"), ("T3", "INNEN ECOCUT 10 / FRAESEN")]
+
+
+def test_korrektur_side_name_and_remark_can_be_changed(tmp_path):
+    tools = extract_tools(load_program_file(METLOG))
+    d = SheetData()
+    d.korrektur["0|T11"] = {"side": 2, "remark": "Anschlag auf S2"}
+    d.korrektur["1|T2"] = {"name": "FERTIG", "remark": "X -0,02"}
+    rows = korrektur_rows(tools, d)
+    assert "T11" not in [r.tool for r in rows[1]]
+    assert rows[2][-1].tool == "T11" and rows[2][-1].remark == "Anschlag auf S2"
+    t2 = [r for r in rows[1] if r.tool == "T2"][0]
+    assert (t2.name, t2.remark) == ("FERTIG", "X -0,02")
+    # gespeichert und wieder geladen
+    prog = tmp_path / "TEIL.txt"
+    prog.write_text("x")
+    save_sheet(str(prog), d)
+    assert load_sheet(str(prog)).korrektur == d.korrektur
+
+
+def test_correction_sheet_pdf(tmp_path):
+    tools = extract_tools(load_program_file(METLOG))
+    d = SheetData()
+    d.korrektur["1|T2"] = {"remark": "X -0,02"}
+    path = str(tmp_path / "METLOG_300069_Korrekturblatt.pdf")
+    render_correction_sheet(path, SheetContext("METLOG_300069", "2: Emco - 2", "Metlog", "METLOG_300069.txt"),
+                            korrektur_rows(tools, d), d)
+    data = open(path, "rb").read()
+    assert data.startswith(b"%PDF-1.4") and data.count(b"/Type /Page ") == 1  # A4, eine Seite
+    assert b"/MediaBox [0 0 595.28 841.89]" in data  # hochkant
+    content = _pdf_streams(data)
+    for needle in (b"(KORREKTURBLATT)", b"(SEITE 1)", b"(SEITE 2)", b"(T12)", b"(T11)", b"(X -0,02)",
+                   b"(Bemerkung)"):
+        assert needle in content, needle
