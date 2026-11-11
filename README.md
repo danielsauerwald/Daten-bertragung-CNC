@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.1
+# CNC-Datenübertragung 2.2
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -11,8 +11,10 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
 
 - **Keine verrutschten Zeilen mehr.** Siehe [unten](#warum-sind-die-zeilen-früher-verrutscht).
 - **Große Touch-Tasten**: Senden, Empfangen, Öffnen, Speichern.
-- **Dateiliste der Maschine** links: einmal antippen, und das Programm wird geöffnet.
-  Das Windows-Dialogfenster mit seinen winzigen Einträgen braucht man nicht mehr.
+- **Dateiliste mit Kundenordnern** links: Ordner antippen öffnet ihn, „‹ Zurück“ führt
+  zurück. Ein Programm antippen öffnet es. Das Suchfeld durchsucht **alle Kundenordner**
+  und zeigt die Treffer nach Ordner sortiert. Antippen von „NAME“ bzw. „DATUM“ sortiert
+  die Liste. Das Windows-Dialogfenster mit seinen winzigen Einträgen braucht man nicht mehr.
 - **Editor mit Zeilennummern und farbiger G-Code-Darstellung**: G, M, T, F/S, N und Kommentare
   sind farblich unterschieden. Er bietet Suchen sowie Rückgängig (Strg+Z) und
   Wiederholen (Strg+Y). Die Schriftgröße lässt sich mit A− / A+ ändern.
@@ -30,16 +32,17 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
 - **Sprungliste für Unterprogramme**: Stehen mehrere Programme in einer Datei
   (z. B. ABSTECH, KANAL1, KANAL2 … in einem Sinumerik-Werkstück), springt man über
   „≡ 8 Programme ▾“ direkt dorthin.
-
-![Empfangenes Sinumerik-Werkstück mit erkanntem Namen](docs/empfangen.png)
-
-![Speichern mit vorgeschlagenem Namen](docs/speichern.png)
+- **Kundenordner wird beim Speichern vorgeschlagen**, siehe [Kundenordner](#kundenordner).
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
 - **LEDs für die Steuerleitungen** CTS, DSR, CD und RI sowie TX/RX, wie im alten Programm.
 - **Warnung vor Sonderzeichen** (ä, ö, ü, Ø …), die viele Steuerungen mit Alarm ablehnen.
 - Klare Fehlermeldungen auf Deutsch, z. B. „COM1 ist belegt. Läuft noch ein anderes Programm?“
 
-![Senden](docs/senden.png)
+![Empfangenes Sinumerik-Werkstück mit erkanntem Namen](docs/empfangen.png)
+
+![Speichern mit vorgeschlagenem Namen und Kundenordner](docs/speichern.png)
+
+![Suche in allen Kundenordnern](docs/suche.png)
 
 ## Installation
 
@@ -75,12 +78,15 @@ Die EXE kann man auch selbst bauen: Auf einem Windows-PC mit Python 3.8 einfach
 
 ## Erste Schritte
 
-1. Oben links auf den Maschinennamen tippen, dann **Bearbeiten …**
+1. Oben rechts auf **⚙ Maschinen** tippen (oder oben links auf den Maschinennamen),
+   dann **Bearbeiten …**
 2. Unter **Schnittstelle** die Werte der Steuerung eintragen. Für die „78: Emco - 2“
    sind die Werte aus dem alten Programm schon vorbelegt: COM1, 9600 Baud, 8 Datenbits,
    keine Parität, 1 Stoppbit, Hardware-Handshake.
 3. Unter **Allgemein** den Programmordner festlegen, wenn die Programme nicht unter
-   `Dokumente\CNC-Programme\<Maschine>` liegen sollen.
+   `Dokumente\CNC-Programme\<Maschine>` liegen sollen. Das geht auch direkt unter der
+   Dateiliste mit **Programmordner ändern …**. Gemeint ist der Hauptordner, in dem die
+   Kundenordner liegen, z. B. `Desktop\Programme\Emco-2`.
 4. Weitere Maschinen mit **Neue Maschine …** oder **Kopieren** anlegen.
 
 Wichtig: Das alte Programm muss geschlossen sein, sonst ist der COM-Port belegt.
@@ -122,6 +128,22 @@ eigenem Kopf `%_N_…_MPF`. Darauf ist das Programm eingestellt:
 - Klammern wie `GETD(Z12)` werden nicht als Kommentar eingefärbt.
 - Für Sinumerik-Maschinen empfiehlt sich als Programmende „Nur nach Zeit ohne Daten“.
   M30 und M17 kommen in einem Werkstück mehrfach vor und taugen deshalb nicht als Ende.
+
+## Kundenordner
+
+Liegen im Programmordner Unterordner je Kunde (z. B. `Bamberg`, `betzer`, `Metlog` …),
+zeigt die Dateiliste sie oben mit Ordnersymbol und Anzahl der Programme an.
+
+Beim **Speichern** wählt das Programm den Ordner selbst vor. Dabei gilt diese Reihenfolge:
+
+1. Gibt es das Programm schon, z. B. `METLOG_300069.txt` in `Metlog`, wird dieser Ordner gewählt.
+2. Sonst wird der Kundenordner gewählt, mit dessen Namen das Programm beginnt.
+   `METLOG_300069` landet so in `Metlog`, `BETZER_300245` in `betzer`.
+3. Sonst wird der Ordner gewählt, der gerade in der Liste geöffnet ist.
+4. Sonst wird der Hauptordner gewählt.
+
+Im Speichern-Fenster lässt sich der Ordner aus einer Liste aller Kundenordner antippen.
+Mit **+ Neuer Ordner** legt man einen neuen Kundenordner an.
 
 ## Warum sind die Zeilen früher verrutscht?
 

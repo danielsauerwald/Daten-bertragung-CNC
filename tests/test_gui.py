@@ -193,3 +193,95 @@ def test_save_dialog_overwrite_warning_and_date(app, tmp_path):
     d.name_var.set("NEU.nc")  # Endung im Namen wird nicht verdoppelt
     assert d.path() == str(tmp_path / "NEU.nc")
     d.destroy()
+
+
+def _customer_tree(root):
+    for d in ("Metlog", "Maweco", "betzer"):
+        os.makedirs(os.path.join(root, d))
+    for rel in ("TAKEOVER.txt", "MAWECO_300210.txt", "Metlog/METLOG_300012.txt", "betzer/BETZER_300245.txt"):
+        with open(os.path.join(root, rel), "w") as fh:
+            fh.write("%\nO1\nM30\n%\n")
+
+
+def test_file_list_shows_customer_folders_and_searches_all(app, tmp_path):
+    root = str(tmp_path / "Emco-2")
+    _customer_tree(root)
+    app.machine.folder = root
+    app.browse_dir = None
+    app.refresh_files(rescan=True)
+    tree = app.file_tree
+    names = [tree.item(i, "text") for i in tree.get_children()]
+    assert names[:3] == ["betzer", "Maweco", "Metlog"]  # Ordner zuerst, A–Z
+    assert set(names[3:]) == {"TAKEOVER.txt", "MAWECO_300210.txt"}
+    assert app.up_btn.instate(["disabled"])
+
+    # Kundenordner öffnen und zurück
+    metlog = [i for i in tree.get_children() if tree.item(i, "text") == "Metlog"][0]
+    app.open_folder(app._dir_paths[metlog])
+    assert app.crumb_label.cget("text") == "Emco-2 › Metlog"
+    assert [tree.item(i, "text") for i in tree.get_children()] == ["METLOG_300012.txt"]
+    app.set_sort("name")
+    assert tree.heading("#0", "text") == "NAME ▴"
+    app.set_sort("date")
+    app.folder_up()
+    assert app.crumb_label.cget("text") == "Emco-2"
+
+    # Suche findet auch Dateien in Kundenordnern
+    app._placeholder_state["active"] = False
+    app.filter_var.set("300245")
+    rows = [tree.item(i, "text").strip() for i in tree.get_children()]
+    assert rows == ["betzer", "BETZER_300245.txt"]  # Treffer unter ihrem Kundenordner
+    assert app.crumb_label.cget("text") == "1 Treffer"
+    # Antippen des Ordnerkopfs öffnet den Ordner
+    folder_row = tree.get_children()[0]
+    assert app._dir_paths[folder_row].endswith("betzer")
+    app.filter_var.set("")
+
+
+def test_save_suggests_customer_folder(app, tmp_path, monkeypatch):
+    from cnc_dnc import dialogs
+
+    root = str(tmp_path / "Emco-2")
+    _customer_tree(root)
+    app.machine.folder = root
+    app.apply_machine(connect=False)
+    app.editor.set_text("%_N_TEIL_MPF\n;$PATH=/_N_WKS_DIR/_N_METLOG_300069_WPD\nM17\n")
+    app.origin = "received"
+    app.dirty = True
+    app._reanalyze()
+    seen = {}
+
+    def fake_show(self):
+        seen["folder_choice"] = self.folder_var.get()
+        seen["reason"] = self.folder_label.cget("text")
+        seen["choices"] = list(self.folder_cb.cget("values"))
+        self.save()
+        return self.result
+
+    monkeypatch.setattr(dialogs.SaveDialog, "show", fake_show)
+    assert app.save()
+    assert seen["folder_choice"] == "Metlog"
+    assert "Kundenordner" in seen["reason"]
+    assert seen["choices"][0].endswith("(Hauptordner)") and "betzer" in seen["choices"]
+    assert app.current_path == os.path.join(root, "Metlog", "METLOG_300069.nc")
+    # Liste springt in den Ordner, in dem gespeichert wurde
+    assert app.crumb_label.cget("text") == "Emco-2 › Metlog"
+
+
+def test_all_buttons_visible_on_tablet_screen(app):
+    """1366x768 minus Taskleiste und Titelleiste – nichts darf abgeschnitten sein."""
+    app.root.geometry("1366x698+0+0")
+    for _ in range(5):
+        app.root.update()
+        time.sleep(0.05)
+    bottom = app.root.winfo_rooty() + app.root.winfo_height()
+    right = app.root.winfo_rootx() + app.root.winfo_width()
+    for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "find_btn",
+                 "zoom_out_btn", "zoom_in_btn", "panel_btn", "machines_btn", "connect_btn", "machine_btn"):
+        w = getattr(app, name)
+        assert w.winfo_ismapped(), name
+        assert w.winfo_rooty() + w.winfo_height() <= bottom - 50, name  # Statuszeile darunter
+        assert w.winfo_rootx() + w.winfo_width() <= right, name
+    # die Ordner-Schaltfläche unter der Dateiliste
+    btn = app.file_panel.grid_slaves(row=5, column=0)[0]
+    assert btn.winfo_rooty() + btn.winfo_height() <= bottom - 50

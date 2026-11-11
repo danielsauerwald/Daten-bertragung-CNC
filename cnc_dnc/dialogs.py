@@ -19,6 +19,7 @@ from .config import (
     MachineProfile,
 )
 from .serial_link import list_ports
+from .files import subfolders
 from .system import IS_WIN, open_touch_keyboard
 from .textutil import END_MODES
 from .theme import C, Fonts, px
@@ -559,10 +560,11 @@ class SaveDialog(Dialog):
     """
 
     def __init__(self, parent, fonts: Fonts, name: str, ext: str, folder: str, detected: str = "",
-                 title: str = "Programm speichern") -> None:
+                 title: str = "Programm speichern", root: Optional[str] = None, folder_reason: str = "") -> None:
         super().__init__(parent, fonts, title)
         self.resizable(False, False)
         self.folder = folder
+        self.root_folder = root
         self.name_var = tk.StringVar(value=name)
         self.ext_var = tk.StringVar(value=ext)
         bg = C["surface"]
@@ -599,11 +601,22 @@ class SaveDialog(Dialog):
             row=5, column=0, sticky="w", pady=(px(self, 16), 0))
         frow = tk.Frame(body, bg=bg)
         frow.grid(row=6, column=0, sticky="ew", pady=(px(self, 6), 0))
-        self.folder_label = tk.Label(frow, text=folder, bg=bg, fg=C["muted"], font=fonts.ui, anchor="w",
-                                     justify="left", wraplength=px(self, 500))
-        self.folder_label.pack(side="left", fill="x", expand=True)
+        # Kundenordner zum Antippen statt Windows-Ordnerdialog
+        self.folder_var = tk.StringVar()
+        self._folder_map: Dict[str, str] = {}
+        self.folder_cb = ttk.Combobox(frow, textvariable=self.folder_var, state="readonly", width=30,
+                                      font=fonts.title, height=14)
+        self.folder_cb.pack(side="left", fill="x", expand=True)
+        self.folder_cb.bind("<<ComboboxSelected>>", lambda e: self._folder_chosen())
+        ttk.Button(frow, text="+ Neuer Ordner", style="Small.TButton", command=self._new_folder).pack(
+            side="left", padx=(px(self, 8), 0))
         ttk.Button(frow, text="Ändern …", style="Small.TButton", command=self._change_folder).pack(
-            side="right", padx=(px(self, 12), 0))
+            side="left", padx=(px(self, 8), 0))
+        self.folder_label = tk.Label(body, text="", bg=bg, fg=C["muted"], font=fonts.small, anchor="w",
+                                     justify="left", wraplength=px(self, 600))
+        self.folder_label.grid(row=7, column=0, sticky="w", pady=(px(self, 4), 0))
+        self.folder_reason = folder_reason
+        self._fill_folders()
 
         bar = tk.Frame(self, bg=C["bg"])
         bar.pack(fill="x")
@@ -670,12 +683,71 @@ class SaveDialog(Dialog):
         self.name_var.set(candidate)
         self.entry.icursor("end")
 
+    # -- Ordnerwahl --------------------------------------------------------------
+
+    def _root_label(self) -> str:
+        root = self.root_folder or ""
+        return "{}  (Hauptordner)".format(os.path.basename(root.rstrip("\\/")) or root)
+
+    def _fill_folders(self) -> None:
+        self._folder_map = {}
+        if self.root_folder:
+            self._folder_map[self._root_label()] = self.root_folder
+            for label, path in subfolders(self.root_folder):
+                self._folder_map[label] = path
+        current = None
+        for label, path in self._folder_map.items():
+            if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(self.folder)):
+                current = label
+        if current is None:  # Ordner außerhalb des Programmordners
+            current = self.folder
+            self._folder_map[current] = self.folder
+        self.folder_cb.configure(values=list(self._folder_map))
+        self.folder_var.set(current)
+        self._show_folder()
+
+    def _show_folder(self) -> None:
+        text = self.folder
+        if self.folder_reason:
+            text = "✓ " + self.folder_reason + "   ·   " + text
+        self.folder_label.configure(text=text, fg=C["ok"] if self.folder_reason else C["muted"])
+
+    def _folder_chosen(self) -> None:
+        path = self._folder_map.get(self.folder_var.get())
+        if path:
+            self.folder = path
+            self.folder_reason = ""
+            self._show_folder()
+            self._validate()
+
+    def _new_folder(self) -> None:
+        base = self.root_folder or self.folder
+        name = ask_text(self, self.fonts, "Neuer Kundenordner",
+                        "Name des neuen Ordners (wird im Programmordner angelegt):")
+        if not name:
+            return
+        name = name.strip()
+        if _BAD_CHARS.search(name) or name in (".", ".."):
+            error(self, self.fonts, "Ungültiger Name", 'Diese Zeichen sind nicht erlaubt:  \\ / : * ? " < > |')
+            return
+        path = os.path.join(base, name)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as exc:
+            error(self, self.fonts, "Ordner konnte nicht angelegt werden", str(exc))
+            return
+        self.folder = path
+        self.folder_reason = "neuer Ordner angelegt"
+        self._fill_folders()
+        self._validate()
+
     def _change_folder(self) -> None:
         start = self.folder if os.path.isdir(self.folder) else os.path.expanduser("~")
         path = filedialog.askdirectory(parent=self, initialdir=start, title="Ordner wählen")
         if path:
             self.folder = os.path.normpath(path)
-            self.folder_label.configure(text=self.folder)
+            self.folder_reason = ""
+            self._fill_folders()
             self._validate()
 
     def save(self) -> None:
@@ -683,3 +755,42 @@ class SaveDialog(Dialog):
             return
         self.result = self.path()
         self.destroy()
+
+
+class TextInputDialog(Dialog):
+    """Einfache Texteingabe (z. B. Name für einen neuen Ordner)."""
+
+    def __init__(self, parent, fonts: Fonts, title: str, message: str, initial: str = "") -> None:
+        super().__init__(parent, fonts, title)
+        self.resizable(False, False)
+        bg = C["surface"]
+        body = tk.Frame(self, bg=bg, padx=px(self, 24), pady=px(self, 20))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=title, bg=bg, fg=C["text"], font=fonts.title, anchor="w").pack(anchor="w")
+        tk.Label(body, text=message, bg=bg, fg=C["muted"], font=fonts.ui, anchor="w", justify="left",
+                 wraplength=px(self, 480)).pack(anchor="w", pady=(px(self, 4), px(self, 10)))
+        row = tk.Frame(body, bg=bg)
+        row.pack(fill="x")
+        self.var = tk.StringVar(value=initial)
+        self.entry = ttk.Entry(row, textvariable=self.var, font=fonts.title, width=28)
+        self.entry.pack(side="left", fill="x", expand=True)
+        if IS_WIN:
+            ttk.Button(row, text="⌨", style="Small.TButton", width=3, command=open_touch_keyboard).pack(
+                side="left", padx=(px(self, 8), 0))
+        bar = tk.Frame(self, bg=C["bg"])
+        bar.pack(fill="x")
+        ttk.Button(bar, text="OK", style="Primary.TButton", command=self.ok).pack(
+            side="right", padx=(0, px(self, 12)), pady=px(self, 14))
+        ttk.Button(bar, text="Abbrechen", command=self.cancel).pack(side="right", padx=(0, px(self, 12)))
+        self.bind("<Return>", lambda e: self.ok())
+        self.entry.focus_set()
+
+    def ok(self) -> None:
+        text = self.var.get().strip()
+        if text:
+            self.result = text
+            self.destroy()
+
+
+def ask_text(parent, fonts: Fonts, title: str, message: str, initial: str = "") -> Optional[str]:
+    return TextInputDialog(parent, fonts, title, message, initial).show()

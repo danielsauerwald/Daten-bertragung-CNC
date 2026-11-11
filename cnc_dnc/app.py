@@ -12,6 +12,7 @@ from typing import Callable, Dict, Optional
 
 from . import APP_NAME, APP_VERSION, dialogs
 from .config import AppConfig, MachineProfile
+from .files import count_files, is_inside, list_folder, rel_label, search, suggest_folder, walk_files
 from .serial_link import SerialError, SerialLink
 from .serial_link import serial as pyserial
 from .system import open_touch_keyboard
@@ -64,7 +65,11 @@ class App:
         self.rx_until = 0.0
         self._last_led_poll = 0.0
         self._file_paths: Dict[str, str] = {}
+        self._dir_paths: Dict[str, str] = {}
         self._tree_drag: Optional[Dict] = None
+        self.browse_dir: Optional[str] = None   # gerade angezeigter (Kunden-)Ordner
+        self.sort_by = "date"                    # "date" | "name"
+        self._walk_cache: Optional[tuple] = None  # (Ordner, Zeitpunkt, Dateien) für die Suche
 
         root.title(APP_NAME)
         root.minsize(px(root, 960), px(root, 600))
@@ -141,7 +146,10 @@ class App:
         if IS_WIN:
             kb = ActionButton(right, f, text="⌨", kind="header", compact=True, command=self._keyboard)
             kb.title_label.configure(font=f.big)
-            kb.pack(side="right", padx=(px(r, 10), 0))
+            kb.pack(side="right", padx=(px(r, 6), 0))
+        self.machines_btn = ActionButton(right, f, text="⚙  Maschinen", kind="header", compact=True,
+                                         command=self.choose_machine, outline=C["header_muted"])
+        self.machines_btn.pack(side="right", padx=(px(r, 16), 0))
         leds = tk.Frame(right, bg=C["header"])
         leds.pack(side="right")
         self.leds: Dict[str, Led] = {}
@@ -157,14 +165,15 @@ class App:
         panel = tk.Frame(body, bg=C["bg"], width=px(r, 320))
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, px(r, 12)))
         panel.grid_propagate(False)
-        panel.grid_rowconfigure(3, weight=1)
+        panel.grid_rowconfigure(4, weight=1)
         panel.grid_columnconfigure(0, weight=1)
         self.file_panel = panel
 
         top = tk.Frame(panel, bg=C["bg"])
         top.grid(row=0, column=0, sticky="ew")
         tk.Label(top, text="Programme", bg=C["bg"], fg=C["text"], font=f.heading).pack(side="left")
-        ttk.Button(top, text="↻", style="Small.TButton", width=3, command=self.refresh_files).pack(side="right")
+        ttk.Button(top, text="↻", style="Small.TButton", width=3,
+                   command=lambda: self.refresh_files(rescan=True)).pack(side="right")
 
         self.folder_label = tk.Label(panel, text="", bg=C["bg"], fg=C["muted"], font=f.small, anchor="w",
                                      justify="left", wraplength=px(r, 310))
@@ -172,21 +181,45 @@ class App:
 
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *a: self.refresh_files())
-        search = ttk.Entry(panel, textvariable=self.filter_var, font=f.ui)
-        search.grid(row=2, column=0, sticky="ew", pady=(0, px(r, 8)))
-        self._placeholder(search, self.filter_var, "Suchen …")
+        search_entry = ttk.Entry(panel, textvariable=self.filter_var, font=f.ui)
+        search_entry.grid(row=2, column=0, sticky="ew", pady=(0, px(r, 6)))
+        self._placeholder(search_entry, self.filter_var, "Suchen in allen Ordnern …")
+
+        # Wo bin ich? "‹ Zurück   Emco-2 › Metlog"
+        crumb = tk.Frame(panel, bg=C["bg"])
+        crumb.grid(row=3, column=0, sticky="ew", pady=(0, px(r, 6)))
+        self.up_btn = ttk.Button(crumb, text="‹ Zurück", style="Small.TButton", command=self.folder_up)
+        self.up_btn.pack(side="left")
+        self.crumb_label = tk.Label(crumb, text="", bg=C["bg"], fg=C["text"], font=f.ui_bold, anchor="w")
+        self.crumb_label.pack(side="left", fill="x", expand=True, padx=(px(r, 8), 0))
 
         box = tk.Frame(panel, bg=C["surface"], highlightthickness=1, highlightbackground=C["border"])
-        box.grid(row=3, column=0, sticky="nsew")
+        box.grid(row=4, column=0, sticky="nsew")
         box.grid_rowconfigure(0, weight=1)
         box.grid_columnconfigure(0, weight=1)
-        self.file_tree = ttk.Treeview(box, columns=("name", "date"), show="headings", selectmode="browse")
-        self.file_tree.heading("name", text="DATEI", anchor="w")
-        self.file_tree.heading("date", text="DATUM", anchor="w")
-        self.file_tree.column("name", width=px(r, 200), anchor="w", stretch=True)
-        self.file_tree.column("date", width=px(r, 76), anchor="w", stretch=False)
+        style = ttk.Style(r)
+        style.configure("Files.Treeview", indent=0)
+        style.layout("Files.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        style.layout("Files.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
+            ("Treeitem.image", {"side": "left", "sticky": ""}),
+            ("Treeitem.text", {"side": "left", "sticky": ""})]})])
+        self.file_tree = ttk.Treeview(box, columns=("date",), show="tree headings", selectmode="browse",
+                                      style="Files.Treeview")
+        self.file_tree.heading("#0", text="NAME", anchor="w", command=lambda: self.set_sort("name"))
+        self.file_tree.heading("date", text="DATUM ▾", anchor="w", command=lambda: self.set_sort("date"))
+        self.file_tree.column("#0", width=px(r, 196), anchor="w", stretch=True)
+        self.file_tree.column("date", width=px(r, 82), anchor="w", stretch=False)
         self.file_tree.tag_configure("hint", foreground=C["muted"])
         self.file_tree.tag_configure("current", font=f.ui_bold)
+        self.file_tree.tag_configure("folder", foreground=C["text"])
+        self.file_tree.tag_configure("count", foreground=C["muted"])
+        try:
+            from .icon import FILE_PNG_BASE64, FOLDER_PNG_BASE64
+
+            self._folder_icon = tk.PhotoImage(master=r, data=FOLDER_PNG_BASE64)
+            self._file_icon = tk.PhotoImage(master=r, data=FILE_PNG_BASE64)
+        except tk.TclError:
+            self._folder_icon = self._file_icon = ""
         sb = ttk.Scrollbar(box, orient="vertical", command=self.file_tree.yview)
         self.file_tree.configure(yscrollcommand=sb.set)
         self.file_tree.grid(row=0, column=0, sticky="nsew")
@@ -195,9 +228,10 @@ class App:
         self.file_tree.bind("<B1-Motion>", self._tree_motion)
         self.file_tree.bind("<ButtonRelease-1>", self._tree_release)
         self.file_tree.bind("<Return>", lambda e: self._open_selected_file())
+        self.file_tree.bind("<BackSpace>", lambda e: self.folder_up())
 
-        ttk.Button(panel, text="Ordner ändern …", style="Small.TButton", command=self.change_folder).grid(
-            row=4, column=0, sticky="ew", pady=(px(r, 8), 0))
+        ttk.Button(panel, text="Programmordner ändern …", style="Small.TButton", command=self.change_folder).grid(
+            row=5, column=0, sticky="ew", pady=(px(r, 8), 0))
 
     def _build_editor(self, body: tk.Frame) -> None:
         r = self.root
@@ -248,61 +282,61 @@ class App:
         self.editor.grid(row=2, column=0, sticky="nsew")
 
     def _build_actions(self, body: tk.Frame) -> None:
+        """Rechte Spalte. Muss auch auf 1366x768 mit Taskleiste komplett sichtbar sein."""
         r = self.root
         f = self.fonts
         side = tk.Frame(body, bg=C["bg"], width=px(r, 236))
         side.grid(row=0, column=2, sticky="nsew", padx=(px(r, 12), 0))
-        side.grid_propagate(False)
-        side.grid_columnconfigure(0, weight=1)
-        side.grid_columnconfigure(1, weight=1)
-        side.grid_columnconfigure(2, weight=1)
-        gap = px(r, 8)
-        row = 0
+        side.pack_propagate(False)
 
-        def place(widget, columnspan=3, column=0, pady=(0, gap), padx=0):
-            nonlocal row
-            widget.grid(row=row, column=column, columnspan=columnspan, sticky="ew", pady=pady, padx=padx)
-            if column + columnspan >= 3:
-                row += 1
+        def add(widget, gap=6):
+            widget.pack(fill="x", pady=(0, px(r, gap)))
+
+        def row(gap=6):
+            fr = tk.Frame(side, bg=C["bg"])
+            fr.pack(fill="x", pady=(0, px(r, gap)))
+            return fr
+
+        def place_row(fr, buttons, weights=None):
+            for i, b in enumerate(buttons):
+                w = weights[i] if weights else 1
+                fr.grid_columnconfigure(i, weight=w, uniform="btn")
+                b.grid(row=0, column=i, sticky="ew",
+                       padx=(0 if i == 0 else px(r, 3), 0 if i == len(buttons) - 1 else px(r, 3)))
 
         self.send_btn = ActionButton(side, f, "Senden", subtitle="PC  →  Maschine", icon="▶", kind="primary",
                                      big=True, command=self.send)
-        place(self.send_btn)
+        add(self.send_btn)
         self.recv_btn = ActionButton(side, f, "Empfangen", subtitle="Maschine  →  PC", icon="◀", kind="success",
                                      big=True, command=self.receive)
-        place(self.recv_btn, pady=(0, px(r, 18)))
+        add(self.recv_btn, gap=14)
 
-        place(self._section(side, "DATEI"))
-        self.open_btn = ActionButton(side, f, "Öffnen …", kind="neutral", compact=True, command=self.open_file)
-        place(self.open_btn)
+        add(self._section(side, "DATEI"), gap=4)
+        fr = row()
+        self.open_btn = ActionButton(fr, f, "Öffnen …", kind="neutral", compact=True, anchor="center",
+                                     command=self.open_file)
+        self.new_btn = ActionButton(fr, f, "Neu", kind="neutral", compact=True, anchor="center",
+                                    command=self.new_document)
+        place_row(fr, [self.open_btn, self.new_btn])
         self.save_btn = ActionButton(side, f, "Speichern", subtitle="", kind="neutral", compact=True,
                                      command=self.save)
-        place(self.save_btn)
+        add(self.save_btn)
         self.saveas_btn = ActionButton(side, f, "Speichern unter …", kind="neutral", compact=True,
                                        command=self.save_as)
-        place(self.saveas_btn)
-        self.new_btn = ActionButton(side, f, "Neu / Leeren", kind="neutral", compact=True, command=self.new_document)
-        place(self.new_btn, pady=(0, px(r, 18)))
+        add(self.saveas_btn, gap=14)
 
-        place(self._section(side, "ANSICHT"))
-        self.find_btn = ActionButton(side, f, "Suchen", kind="neutral", compact=True, anchor="center",
+        add(self._section(side, "ANSICHT"), gap=4)
+        fr = row()
+        self.find_btn = ActionButton(fr, f, "Suchen", kind="neutral", compact=True, anchor="center",
                                      command=lambda: self.toggle_find())
-        place(self.find_btn, columnspan=1, column=0, padx=(0, px(r, 4)))
-        self.zoom_out_btn = ActionButton(side, f, "A−", kind="neutral", compact=True, anchor="center",
+        self.zoom_out_btn = ActionButton(fr, f, "A−", kind="neutral", compact=True, anchor="center",
                                          command=lambda: self.zoom(-1))
-        place(self.zoom_out_btn, columnspan=1, column=1, padx=px(r, 2))
-        self.zoom_in_btn = ActionButton(side, f, "A+", kind="neutral", compact=True, anchor="center",
+        self.zoom_in_btn = ActionButton(fr, f, "A+", kind="neutral", compact=True, anchor="center",
                                         command=lambda: self.zoom(1))
-        place(self.zoom_in_btn, columnspan=1, column=2, padx=(px(r, 4), 0))
+        place_row(fr, [self.find_btn, self.zoom_out_btn, self.zoom_in_btn], weights=(2, 1, 1))
         self.panel_btn = ActionButton(side, f, "Dateiliste ein/aus", kind="neutral", compact=True,
-                                      command=self.toggle_file_panel)
-        place(self.panel_btn)
-
-        place(tk.Frame(side, bg=C["bg"]), pady=0)
-        side.grid_rowconfigure(row - 1, weight=1)
-        self.machines_btn = ActionButton(side, f, "Maschinen …", subtitle="Liste & Schnittstellen-Einstellungen",
-                                         kind="neutral", compact=True, command=self.choose_machine)
-        place(self.machines_btn, pady=(0, 0))
+                                      anchor="center", command=self.toggle_file_panel)
+        add(self.panel_btn, gap=0)
 
     def _section(self, parent, text: str) -> tk.Label:
         return tk.Label(parent, text=text, bg=C["bg"], fg=C["faint"], font=self.fonts.small_bold, anchor="w")
@@ -401,6 +435,8 @@ class App:
         if connect:
             self._connect(show_error=False)
         self._update_connection()
+        self.browse_dir = None
+        self._walk_cache = None
         self.refresh_files()
         self._update_title()
 
@@ -691,46 +727,114 @@ class App:
     # Dateien
     # ======================================================================
 
-    def refresh_files(self) -> None:
+    def refresh_files(self, rescan: bool = False) -> None:
+        """Dateiliste neu aufbauen: Kundenordner oben, darunter die Programme."""
         if not hasattr(self, "file_tree"):
             return
-        folder = self.machine.program_folder()
-        self.folder_label.configure(text=folder)
+        if rescan:
+            self._walk_cache = None
+        root = self.machine.program_folder()
+        if (self.browse_dir is None or not is_inside(root, self.browse_dir)
+                or not os.path.isdir(self.browse_dir)):
+            self.browse_dir = root
+        self.folder_label.configure(text=root)
         tree = self.file_tree
         tree.delete(*tree.get_children())
         self._file_paths = {}
-        entries = []
-        try:
-            for name in os.listdir(folder):
-                path = os.path.join(folder, name)
-                if os.path.isfile(path) and not name.startswith("."):
-                    entries.append((os.path.getmtime(path), name, path))
-        except OSError:
-            tree.insert("", "end", values=("Noch keine Programme", ""), tags=("hint",))
-            return
-        flt = self._filter_text()
-        if flt:
-            entries = [e for e in entries if flt in e[1].lower()]
-        entries.sort(reverse=True)
-        if not entries:
-            tree.insert("", "end", values=("Keine Treffer" if flt else "Noch keine Programme", ""), tags=("hint",))
-            return
-        today = datetime.date.today()
+        self._dir_paths = {}
         cur = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else None
-        for mtime, name, path in entries[:3000]:
-            dt = datetime.datetime.fromtimestamp(mtime)
-            if dt.date() == today:
-                date = dt.strftime("%H:%M")
-            elif dt.year == today.year:
-                date = dt.strftime("%d.%m.")
-            else:
-                date = dt.strftime("%d.%m.%y")
-            is_cur = cur is not None and os.path.normcase(os.path.abspath(path)) == cur
-            iid = tree.insert("", "end", values=(name, date), tags=("current",) if is_cur else ())
-            self._file_paths[iid] = path
-            if is_cur:
-                tree.selection_set(iid)
-                tree.see(iid)
+        flt = self._filter_text()
+
+        if flt:
+            # Suche über alle Kundenordner – Treffer nach Ordner gruppiert
+            self.up_btn.state(["disabled"])
+            hits = search(self._all_files(root), flt)
+            self.crumb_label.configure(text="{} Treffer".format(fmt_int(len(hits))))
+            if not hits:
+                tree.insert("", "end", text="Keine Treffer", values=("",), tags=("hint",))
+                return
+            groups: Dict[str, list] = {}
+            for h in hits[:2000]:
+                groups.setdefault(h.folder, []).append(h)
+            for folder in sorted(groups, key=lambda g: (g != "", g.lower())):
+                items = groups[folder]
+                label = folder or "Hauptordner"
+                fid = tree.insert("", "end", text=label, image=self._folder_icon,
+                                  values=("{}  ›".format(len(items)),), tags=("folder",))
+                self._dir_paths[fid] = os.path.dirname(items[0].path)
+                items.sort(key=lambda h: h.name.lower() if self.sort_by == "name" else -h.mtime)
+                for h in items:
+                    self._insert_file("  " + h.name, h.path, self._fmt_date(h.mtime), cur)
+            return
+
+        # normaler Ordner
+        at_root = os.path.normcase(os.path.abspath(self.browse_dir)) == os.path.normcase(os.path.abspath(root))
+        self.up_btn.state(["disabled"] if at_root else ["!disabled"])
+        crumb = os.path.basename(root.rstrip("\\/")) or root
+        sub = rel_label(root, self.browse_dir)
+        self.crumb_label.configure(text=crumb + (" › " + sub if sub else ""))
+        if not os.path.isdir(self.browse_dir):
+            tree.insert("", "end", text="Noch keine Programme", values=("",), tags=("hint",))
+            return
+        dirs, files = list_folder(self.browse_dir)
+        for d in dirs:
+            iid = tree.insert("", "end", text=d.name, image=self._folder_icon,
+                              values=("{}  ›".format(count_files(d.path)),), tags=("folder",))
+            self._dir_paths[iid] = d.path
+        if self.sort_by == "name":
+            files.sort(key=lambda e: e.name.lower())
+        else:
+            files.sort(key=lambda e: -e.mtime)
+        for e in files[:3000]:
+            self._insert_file(e.name, e.path, self._fmt_date(e.mtime), cur)
+        if not dirs and not files:
+            tree.insert("", "end", text="Noch keine Programme", values=("",), tags=("hint",))
+
+    def _insert_file(self, name: str, path: str, second: str, cur: Optional[str]) -> None:
+        is_cur = cur is not None and os.path.normcase(os.path.abspath(path)) == cur
+        iid = self.file_tree.insert("", "end", text=name, image=self._file_icon, values=(second,),
+                                    tags=("current",) if is_cur else ())
+        self._file_paths[iid] = path
+        if is_cur:
+            self.file_tree.selection_set(iid)
+            self.file_tree.see(iid)
+
+    @staticmethod
+    def _fmt_date(mtime: float) -> str:
+        dt = datetime.datetime.fromtimestamp(mtime)
+        today = datetime.date.today()
+        if dt.date() == today:
+            return dt.strftime("%H:%M")
+        if dt.year == today.year:
+            return dt.strftime("%d.%m.")
+        return dt.strftime("%d.%m.%y")
+
+    def _all_files(self, root: str):
+        """Alle Dateien für die Suche – kurz zwischengespeichert, damit das Tippen flüssig bleibt."""
+        now = time.monotonic()
+        c = self._walk_cache
+        if c is None or c[0] != root or now - c[1] > 30:
+            c = (root, now, walk_files(root))
+            self._walk_cache = c
+        return c[2]
+
+    def set_sort(self, by: str) -> None:
+        """Überschrift antippen: nach Name (A–Z) oder Datum (neueste zuerst) sortieren."""
+        self.sort_by = by
+        self.file_tree.heading("#0", text="NAME ▴" if by == "name" else "NAME")
+        self.file_tree.heading("date", text="DATUM ▾" if by == "date" else "DATUM")
+        self.refresh_files()
+
+    def open_folder(self, path: str) -> None:
+        self.browse_dir = path
+        self.refresh_files()
+        self.file_tree.yview_moveto(0)
+
+    def folder_up(self) -> None:
+        root = self.machine.program_folder()
+        if self.browse_dir and os.path.normcase(os.path.abspath(self.browse_dir)) != \
+                os.path.normcase(os.path.abspath(root)):
+            self.open_folder(os.path.dirname(os.path.abspath(self.browse_dir)))
 
     def change_folder(self) -> None:
         if self.busy:
@@ -743,8 +847,9 @@ class App:
                                        title="Programmordner für {}".format(m.display_name))
         if path:
             m.folder = os.path.normpath(path)
+            self.browse_dir = m.folder
             self._save_config()
-            self.refresh_files()
+            self.refresh_files(rescan=True)
             self._update_title()
 
     def _tree_press(self, event) -> None:
@@ -772,13 +877,18 @@ class App:
         if d is None or d["moved"]:
             return
         iid = self.file_tree.identify_row(event.y)
-        if iid and iid in self._file_paths:
+        if iid and iid in self._dir_paths:
+            path = self._dir_paths[iid]
+            self.root.after_idle(lambda: self.open_folder(path))
+        elif iid and iid in self._file_paths:
             self.file_tree.selection_set(iid)
             self.root.after_idle(lambda: self.open_file(self._file_paths.get(iid)))
 
     def _open_selected_file(self) -> None:
         sel = self.file_tree.selection()
-        if sel and sel[0] in self._file_paths:
+        if sel and sel[0] in self._dir_paths:
+            self.open_folder(self._dir_paths[sel[0]])
+        elif sel and sel[0] in self._file_paths:
             self.open_file(self._file_paths[sel[0]])
 
     def open_file(self, path: Optional[str] = None) -> None:
@@ -790,7 +900,7 @@ class App:
             self.refresh_files()
             return
         if path is None:
-            folder = self.machine.program_folder()
+            folder = self.browse_dir or self.machine.program_folder()
             path = filedialog.askopenfilename(parent=self.root, filetypes=FILE_TYPES,
                                               initialdir=folder if os.path.isdir(folder) else os.path.expanduser("~"),
                                               title="Programm öffnen")
@@ -826,7 +936,8 @@ class App:
             return self._write(self.current_path)
         if not silent:
             return self._save_with_dialog()
-        return self._write(self._auto_path(self.machine.program_folder(), text))
+        folder, _why = suggest_folder(self.machine.program_folder(), analyze_program(text).name, self.browse_dir)
+        return self._write(self._auto_path(folder, text))
 
     def save_as(self) -> bool:
         if self.busy:
@@ -856,12 +967,14 @@ class App:
             folder = os.path.dirname(self.current_path)
             base, ext = os.path.splitext(os.path.basename(self.current_path))
             title = "Speichern unter"
+            why = ""
         else:
-            folder = m.program_folder()
             base, ext = self._suggested_name(), m.file_ext
+            folder, why = suggest_folder(m.program_folder(), self.doc_info.name, self.browse_dir)
             title = "Programm speichern"
         detected = self.doc_info.summary() if self.doc_info.name else ""
-        path = dialogs.SaveDialog(self.root, self.fonts, base, ext, folder, detected=detected, title=title).show()
+        path = dialogs.SaveDialog(self.root, self.fonts, base, ext, folder, detected=detected, title=title,
+                                  root=m.program_folder(), folder_reason=why).show()
         if not path:
             return False
         new_ext = os.path.splitext(path)[1]
@@ -881,7 +994,10 @@ class App:
         self.origin = "file"
         self.dirty = False
         self._update_title()
-        self.refresh_files()
+        # Liste zeigt den Ordner, in dem gespeichert wurde
+        if is_inside(self.machine.program_folder(), path):
+            self.browse_dir = os.path.dirname(os.path.abspath(path))
+        self.refresh_files(rescan=True)
         self.set_status("✓  Gespeichert: " + path, "ok")
         return True
 
@@ -953,6 +1069,7 @@ class App:
             menu.grab_release()
 
     def _on_cursor(self, line: int, col: int, total: int) -> None:
+        total = max(total, line)
         self.cursor_label.configure(text="Zeile {} / {}  ·  Sp. {}".format(fmt_int(line), fmt_int(total), col))
 
     def _update_title(self) -> None:
