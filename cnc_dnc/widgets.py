@@ -367,7 +367,15 @@ class CodeEditor(tk.Frame):
     def schedule_refresh(self) -> None:
         if not self._refresh_pending:
             self._refresh_pending = True
-            self.after_idle(self._refresh)
+            self._refresh_job = self.after_idle(self._refresh)
+
+    def cancel_jobs(self) -> None:
+        if self._refresh_pending and getattr(self, "_refresh_job", None):
+            try:
+                self.after_cancel(self._refresh_job)
+            except tk.TclError:
+                pass
+        self._refresh_pending = False
 
     def _refresh(self) -> None:
         self._refresh_pending = False

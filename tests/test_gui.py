@@ -41,8 +41,7 @@ def app(tmp_path):
     a = App(root, cfg)
     a._test_master = master
     yield a
-    if a._analyze_job is not None:
-        root.after_cancel(a._analyze_job)
+    a.cancel_jobs()
     a.link.close()
     root.destroy()
     os.close(master)

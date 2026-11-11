@@ -79,7 +79,7 @@ class App:
         self.apply_machine(connect=True)
         self._update_title()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        root.after(POLL_MS, self._poll)
+        self._poll_job = root.after(POLL_MS, self._poll)
         if pyserial is None:
             root.after(300, lambda: dialogs.error(
                 root, self.fonts, "pyserial fehlt",
@@ -681,6 +681,9 @@ class App:
         if t and t["text_buf"]:
             self.editor.append("".join(t["text_buf"]))
             t["text_buf"] = []
+            # Name sofort zeigen, sobald der Programmkopf da ist (solange der Text noch kurz ist)
+            if self.doc_info.name is None and t["rx_bytes"] < 20000:
+                self._reanalyze()
 
     # ======================================================================
     # Ereignisschleife
@@ -705,7 +708,7 @@ class App:
             if lines is not None:
                 for name in ("CTS", "DSR", "CD", "RI"):
                     self.leds[name].set(lines[name])
-        self.root.after(POLL_MS, self._poll)
+        self._poll_job = self.root.after(POLL_MS, self._poll)
 
     def _handle_event(self, ev, now: float) -> None:
         kind = ev[0]
@@ -1185,7 +1188,17 @@ class App:
         except tk.TclError:
             pass
         self._save_config()
-        if self._analyze_job is not None:
-            self.root.after_cancel(self._analyze_job)
+        self.cancel_jobs()
         self.link.close()
         self.root.destroy()
+
+    def cancel_jobs(self) -> None:
+        """Geplante Hintergrund-Aufgaben stoppen (vor dem Schließen des Fensters)."""
+        for job in (self._analyze_job, getattr(self, "_poll_job", None)):
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+        self._analyze_job = None
+        self.editor.cancel_jobs()
