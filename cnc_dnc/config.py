@@ -162,6 +162,9 @@ class AppConfig:
     active_machine_id: str = ""
     editor_font_size: int = 14
     show_file_panel: bool = True
+    # Bildschirmtastatur automatisch öffnen beim Antippen von Eingabefeldern / des Editors
+    touch_keyboard: bool = True
+    touch_keyboard_editor: bool = False
     geometry: str = ""
 
     path: str = field(default="", repr=False, compare=False)
@@ -211,6 +214,8 @@ class AppConfig:
         except (TypeError, ValueError):
             pass
         cfg.show_file_panel = bool(data.get("show_file_panel", True))
+        cfg.touch_keyboard = bool(data.get("touch_keyboard", True))
+        cfg.touch_keyboard_editor = bool(data.get("touch_keyboard_editor", False))
         cfg.geometry = str(data.get("geometry", ""))
         return cfg
 
@@ -222,6 +227,8 @@ class AppConfig:
             "active_machine_id": self.active_machine_id,
             "editor_font_size": self.editor_font_size,
             "show_file_panel": self.show_file_panel,
+            "touch_keyboard": self.touch_keyboard,
+            "touch_keyboard_editor": self.touch_keyboard_editor,
             "geometry": self.geometry,
             "machines": [asdict(m) for m in self.machines],
         }

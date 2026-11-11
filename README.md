@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.2
+# CNC-Datenübertragung 2.3
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -192,7 +192,20 @@ im selben Ordner in `fehler.log` protokolliert.
 | Strg+Plus / Strg+Minus | Schrift größer / kleiner |
 | Strg+Z / Strg+Y | Rückgängig / Wiederholen |
 
-Auf dem Tablet öffnet die Taste ⌨ oben rechts die Bildschirmtastatur.
+### Bildschirmtastatur
+
+Windows 7 öffnet die Tastatur nur bei seinen eigenen Eingabefeldern von selbst.
+Deshalb öffnet das Programm sie selbst, sobald man ein Eingabefeld **antippt**:
+Dateiname, Suche, Maschinen-Einstellungen usw. Bloßes Wischen oder eine reine
+Auswahlliste öffnet sie nicht. Wird ein Fenster wie „Programm speichern“ geschlossen
+oder startet eine Übertragung, blendet das Programm die Tastatur wieder aus.
+
+Unter **⚙ Maschinen** lässt sich das oben einstellen:
+- „Automatisch öffnen, wenn ein Eingabefeld angetippt wird“ (Standard: an)
+- „Auch beim Antippen des Programm-Editors öffnen“ (Standard: aus, damit beim Lesen
+  und Blättern nicht ständig die Tastatur aufspringt)
+
+Die Taste ⌨ oben rechts öffnet bzw. schließt die Tastatur jederzeit von Hand.
 Mit dem Finger scrollt man im Editor auf der Spalte mit den Zeilennummern oder
 über die breiten Scrollbalken, in der Dateiliste direkt in der Liste.
 

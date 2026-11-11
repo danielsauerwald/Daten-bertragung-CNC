@@ -20,13 +20,15 @@ from .config import (
 )
 from .serial_link import list_ports
 from .files import subfolders
-from .system import IS_WIN, open_touch_keyboard
+from .system import IS_WIN, hide_touch_keyboard, toggle_touch_keyboard
 from .textutil import END_MODES
 from .theme import C, Fonts, px
 
 
 class Dialog(tk.Toplevel):
     """Modaler Dialog, zentriert über dem Hauptfenster."""
+
+    closes_keyboard = True  # Bildschirmtastatur beim Schließen ausblenden
 
     def __init__(self, parent: tk.Misc, fonts: Fonts, title: str) -> None:
         super().__init__(parent)
@@ -43,6 +45,12 @@ class Dialog(tk.Toplevel):
     def cancel(self) -> None:
         self.result = None
         self.destroy()
+
+    def destroy(self) -> None:
+        # Eine für diesen Dialog geöffnete Bildschirmtastatur wieder ausblenden
+        if self.closes_keyboard:
+            hide_touch_keyboard()
+        super().destroy()
 
     def show(self):
         self.update_idletasks()
@@ -79,6 +87,7 @@ ICONS = {
 
 
 class MessageDialog(Dialog):
+    closes_keyboard = False  # z. B. Fehlermeldung beim Ausfüllen: Tastatur bleibt offen
     def __init__(self, parent, fonts: Fonts, title: str, message: str,
                  buttons: Sequence[Tuple[str, str, str]], icon: str = "info", detail: str = "") -> None:
         super().__init__(parent, fonts, title)
@@ -190,7 +199,27 @@ class MachineListDialog(Dialog):
         ttk.Button(side, text="Kopieren", width=bw, command=self.duplicate).pack(fill="x", pady=(px(self, 8), 0))
         ttk.Button(side, text="Löschen", width=bw, command=self.delete).pack(fill="x", pady=(px(self, 8), 0))
         ttk.Button(side, text="Schließen", width=bw, command=self.cancel).pack(side="bottom", fill="x")
+
+        # Allgemeine Einstellungen (gelten für alle Maschinen)
+        general = tk.Frame(self, bg=C["bg"])
+        general.pack(fill="x", padx=px(self, 20), pady=(0, px(self, 16)), before=main)
+        tk.Label(general, text="BILDSCHIRMTASTATUR", bg=C["bg"], fg=C["faint"], font=fonts.small_bold).pack(
+            anchor="w")
+        self.kb_var = tk.BooleanVar(value=config.touch_keyboard)
+        self.kb_editor_var = tk.BooleanVar(value=config.touch_keyboard_editor)
+        ttk.Checkbutton(general, text="Automatisch öffnen, wenn ein Eingabefeld angetippt wird",
+                        variable=self.kb_var, command=self._kb_changed).pack(anchor="w")
+        ttk.Checkbutton(general, text="Auch beim Antippen des Programm-Editors öffnen",
+                        variable=self.kb_editor_var, command=self._kb_changed).pack(anchor="w")
         self._fill()
+
+    def _kb_changed(self) -> None:
+        self.config_obj.touch_keyboard = bool(self.kb_var.get())
+        self.config_obj.touch_keyboard_editor = bool(self.kb_editor_var.get())
+        try:
+            self.config_obj.save()
+        except OSError:
+            pass
 
     def _fill(self, select: Optional[str] = None) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -591,7 +620,7 @@ class SaveDialog(Dialog):
         ttk.Combobox(row, textvariable=self.ext_var, values=exts, width=6, font=fonts.title).pack(
             side="left", padx=(px(self, 8), 0))
         if IS_WIN:
-            ttk.Button(row, text="⌨", style="Small.TButton", width=3, command=open_touch_keyboard).pack(
+            ttk.Button(row, text="⌨", style="Small.TButton", width=3, command=toggle_touch_keyboard).pack(
                 side="left", padx=(px(self, 8), 0))
         self.hint = tk.Label(body, text="", bg=bg, fg=C["muted"], font=fonts.small, anchor="w", justify="left",
                              wraplength=px(self, 600))
@@ -775,7 +804,7 @@ class TextInputDialog(Dialog):
         self.entry = ttk.Entry(row, textvariable=self.var, font=fonts.title, width=28)
         self.entry.pack(side="left", fill="x", expand=True)
         if IS_WIN:
-            ttk.Button(row, text="⌨", style="Small.TButton", width=3, command=open_touch_keyboard).pack(
+            ttk.Button(row, text="⌨", style="Small.TButton", width=3, command=toggle_touch_keyboard).pack(
                 side="left", padx=(px(self, 8), 0))
         bar = tk.Frame(self, bg=C["bg"])
         bar.pack(fill="x")

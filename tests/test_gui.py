@@ -284,3 +284,41 @@ def test_all_buttons_visible_on_tablet_screen(app):
     # die Ordner-Schaltfläche unter der Dateiliste
     btn = app.file_panel.grid_slaves(row=5, column=0)[0]
     assert btn.winfo_rooty() + btn.winfo_height() <= bottom - 50
+
+
+def test_touch_keyboard_opens_when_input_is_tapped(app, monkeypatch):
+    import cnc_dnc.app as app_mod
+    from cnc_dnc.dialogs import SaveDialog
+
+    calls = []
+    monkeypatch.setattr(app_mod, "show_touch_keyboard", lambda: calls.append(1) or True)
+
+    def tap(w, dy=0):
+        w.event_generate("<ButtonPress-1>", x=6, y=6)
+        w.event_generate("<ButtonRelease-1>", x=6, y=6 + dy)
+        app.root.update()
+        time.sleep(0.15)
+        app.root.update()
+        n = len(calls)
+        del calls[:]
+        return n
+
+    app.root.update()
+    assert tap(app.search_entry) == 1            # Suchfeld antippen -> Tastatur
+    assert tap(app.search_entry, dy=40) == 0     # Wischen ist kein Antippen
+    assert tap(app.editor.text) == 0             # Editor: standardmäßig aus
+    app.cfg.touch_keyboard_editor = True
+    assert tap(app.editor.text) == 1
+    app.editor.set_readonly(True)                # während einer Übertragung
+    assert tap(app.editor.text) == 0
+    app.editor.set_readonly(False)
+
+    d = SaveDialog(app.root, app.fonts, "TEIL", ".nc", os.getcwd())
+    d.deiconify()
+    app.root.update()
+    assert tap(d.entry) == 1                     # Dateiname eingeben
+    assert tap(d.folder_cb) == 0                 # reine Auswahlliste -> keine Tastatur
+    d.destroy()
+
+    app.cfg.touch_keyboard = False               # Einstellung aus
+    assert tap(app.search_entry) == 0

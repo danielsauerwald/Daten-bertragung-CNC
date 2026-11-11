@@ -15,7 +15,7 @@ from .config import AppConfig, MachineProfile
 from .files import count_files, is_inside, list_folder, rel_label, search, suggest_folder, walk_files
 from .serial_link import SerialError, SerialLink
 from .serial_link import serial as pyserial
-from .system import open_touch_keyboard
+from .system import hide_touch_keyboard, show_touch_keyboard, toggle_touch_keyboard
 from .textutil import (
     DIALECT_NAMES,
     ProgramInfo,
@@ -76,6 +76,7 @@ class App:
         self._set_icon()
         self._build()
         self._bind_keys()
+        self._install_touch_keyboard()
         self.apply_machine(connect=True)
         self._update_title()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -181,9 +182,9 @@ class App:
 
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *a: self.refresh_files())
-        search_entry = ttk.Entry(panel, textvariable=self.filter_var, font=f.ui)
-        search_entry.grid(row=2, column=0, sticky="ew", pady=(0, px(r, 6)))
-        self._placeholder(search_entry, self.filter_var, "Suchen in allen Ordnern …")
+        self.search_entry = ttk.Entry(panel, textvariable=self.filter_var, font=f.ui)
+        self.search_entry.grid(row=2, column=0, sticky="ew", pady=(0, px(r, 6)))
+        self._placeholder(self.search_entry, self.filter_var, "Suchen in allen Ordnern …")
 
         # Wo bin ich? "‹ Zurück   Emco-2 › Metlog"
         crumb = tk.Frame(panel, bg=C["bg"])
@@ -490,8 +491,49 @@ class App:
                 led.set(False)
 
     def _keyboard(self) -> None:
-        if not open_touch_keyboard():
+        if not toggle_touch_keyboard():
             self.set_status("Bildschirmtastatur konnte nicht gestartet werden.", "warn")
+
+    # -- Bildschirmtastatur automatisch öffnen --------------------------------
+    #
+    # Windows öffnet den Tablet-Eingabebereich nur bei seinen eigenen Eingabefeldern
+    # von selbst. Deshalb öffnen wir ihn, sobald ein Eingabefeld *angetippt* wird
+    # (nicht beim bloßen Fokus, sonst ginge sie bei jedem Dialog auf).
+
+    INPUT_CLASSES = ("TEntry", "TCombobox", "TSpinbox", "Entry", "Spinbox", "Text")
+
+    def _install_touch_keyboard(self) -> None:
+        self._tap_start: Optional[tuple] = None
+        for cls in self.INPUT_CLASSES:
+            # Doppel-/Dreifach-Tipp sind in Tk eigene Ereignisse – die zählen auch
+            for seq in ("<ButtonPress-1>", "<Double-ButtonPress-1>", "<Triple-ButtonPress-1>"):
+                self.root.bind_class(cls, seq, self._input_press, add="+")
+            self.root.bind_class(cls, "<ButtonRelease-1>", self._input_tap, add="+")
+
+    def _input_press(self, event) -> None:
+        self._tap_start = (event.widget, event.x_root, event.y_root)
+
+    def _input_tap(self, event) -> None:
+        start, self._tap_start = self._tap_start, None
+        if not self.cfg.touch_keyboard or start is None or start[0] is not event.widget:
+            return
+        if abs(event.x_root - start[1]) > 12 or abs(event.y_root - start[2]) > 12:
+            return  # Wischen/Markieren, kein Antippen
+        w = event.widget
+        try:
+            state = str(w.cget("state"))
+        except (tk.TclError, AttributeError):
+            state = "normal"
+        if state in ("disabled", "readonly"):
+            return  # z. B. Auswahlliste ohne Texteingabe
+        if w.winfo_class() == "Text" and not self.cfg.touch_keyboard_editor:
+            return
+        try:
+            if "arrow" in str(w.identify(event.x, event.y)):
+                return  # Pfeil einer Auswahlliste/eines Zahlenfelds angetippt
+        except (tk.TclError, AttributeError):
+            pass
+        self.root.after(80, show_touch_keyboard)
 
     # ======================================================================
     # Senden / Empfangen
@@ -558,6 +600,7 @@ class App:
         self.link.cancel()
 
     def _begin_transfer(self, kind: str, total: int = 0, lines: int = 0) -> None:
+        hide_touch_keyboard()  # Platz für die Fortschrittsanzeige
         m = self.machine
         self.transfer = {"kind": kind, "start": time.monotonic(), "sent": 0, "total": total, "line": 0,
                          "lines": lines, "cancelled": False, "rx_bytes": 0, "text_buf": []}
