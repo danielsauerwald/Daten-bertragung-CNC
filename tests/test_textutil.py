@@ -167,3 +167,79 @@ def test_fanuc_multi_program_list():
 def test_heidenhain_name():
     info = analyze_program("0 BEGIN PGM PLATTE MM\n1 BLK FORM 0.1 Z X+0\n2 END PGM PLATTE MM\n")
     assert (info.name, info.dialect) == ("PLATTE", "heidenhain")
+
+
+# --------------------------------------------------------------------------
+# Zusammenrücken: Leerzeilen weg, 2 Leerzeilen vor jedem Werkzeug
+# --------------------------------------------------------------------------
+
+from cnc_dnc.textutil import compact_program, is_tool_call  # noqa: E402
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("T12D1 G96 LIMS=2200 S=R77 G18 M8", True),
+    ("N30 T01 M06", True),
+    ("M06T02", True),
+    ('T="BOHRER_8" D1', True),
+    ("1 TOOL CALL 5 Z S2000", True),
+    ("(WERKZEUG T01 - PLANFRAESER)", False),     # nur Kommentar
+    (";T05 BOHRER", False),
+    ("STOPRE", False),
+    ("TRANSMIT_S3", False),
+    ("TAKEOVER(\"ABSTECH\",R86,6000,R87,0,0)", False),
+    ("$TC_DP1[1,1]=120", False),
+    ("G01 X10 Z-5 F0.2", False),
+])
+def test_is_tool_call(line, expected):
+    assert is_tool_call(line) is expected
+
+
+def _blank_runs(text):
+    """Längen aller Folgen von Leerzeilen."""
+    runs, n = [], 0
+    for ln in text.split("\n")[:-1]:
+        if ln.strip():
+            if n:
+                runs.append(n)
+            n = 0
+        else:
+            n += 1
+    return runs
+
+
+def test_compact_metlog():
+    text = load_program_file(METLOG)
+    r = compact_program(text)
+    out = r.text
+    # nur noch Zweier-Abstände, sonst keine Leerzeilen
+    assert set(_blank_runs(out)) == {2}
+    # kein Programmtext verloren oder verändert (bis auf Leerzeichen am Zeilenende)
+    assert [ln.rstrip() for ln in text.split("\n") if ln.strip()] == [ln for ln in out.split("\n") if ln.strip()]
+    # Kommentar bleibt beim Werkzeug, Abstand steht darüber
+    assert "G40 G00 X150 Z130\n\n\n;FERTIGDREHEN VCMT04\nT02D1 G95 G18 S2500 M3 M8\n" in out
+    # direkt nach dem Programmkopf kein Abstand
+    assert out.startswith("%_N_ABSTECH_MPF\n;$PATH=/_N_WKS_DIR/_N_METLOG_300069_WPD\nT12D1")
+    assert "%_N_KANAL1_MPF\n;$PATH=/_N_WKS_DIR/_N_METLOG_300069_WPD\n;VORDREHEN VNMG08\nT01D1" in out
+    # Unterprogramme bleiben getrennt
+    assert "M17\n\n\n%_N_ANSCHLAGEN_MPF\n" in out
+    # Leerzeichen innerhalb der Zeile bleiben, am Zeilenende nicht
+    assert "G75 X0 FP=1        ;1. SEITE FREIFAHREN\n" in out
+    assert " \n" not in out
+    assert (r.tools, r.tool_gaps, r.program_gaps) == (12, 10, 7)
+    # zweimal anwenden ändert nichts mehr
+    assert compact_program(out).text == out
+
+
+def test_compact_fanuc():
+    text = ("%\n\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\n\n\nN20 G54\nN30 T01 M06\n"
+            "N40 S2400 M03\n\n(BOHRER)\n\nN100 T05 M06\nN110 M30\n\n%\n")
+    out = compact_program(text).text
+    assert out == ("%\nO1234 (FLANSCH)\n(WERKZEUG T01 - PLANFRAESER)\nN10 G21 G90\nN20 G54\n\n\nN30 T01 M06\n"
+                   "N40 S2400 M03\n\n\n(BOHRER)\nN100 T05 M06\nN110 M30\n%\n")
+
+
+def test_compact_heidenhain_only_removes_blank_lines():
+    text = "0 BEGIN PGM P MM\n\n1 TOOL CALL 1 Z S100\n\n2 L X0\n3 TOOL CALL 2 Z\n4 END PGM P MM\n"
+    r = compact_program(text, dialect="heidenhain")
+    assert r.text == "0 BEGIN PGM P MM\n1 TOOL CALL 1 Z S100\n2 L X0\n3 TOOL CALL 2 Z\n4 END PGM P MM\n"
+    assert r.tool_gaps == 0 and r.removed == 2

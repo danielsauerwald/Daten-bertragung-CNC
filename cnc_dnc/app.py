@@ -21,6 +21,7 @@ from .textutil import (
     ProgramInfo,
     analyze_program,
     build_send_chunks,
+    compact_program,
     count_lines,
     find_problem_chars,
     load_program_file,
@@ -247,6 +248,8 @@ class App:
         # Rechte Seite zuerst packen, damit sie bei langen Namen nicht zusammengedrückt wird
         self.cursor_label = tk.Label(info, text="", bg=C["bg"], fg=C["muted"], font=f.ui)
         self.cursor_label.pack(side="right")
+        self.undo_btn = ttk.Button(info, text="↶ Rückgängig", style="Small.TButton", command=self.undo)
+        self.undo_btn.pack(side="right", padx=(px(r, 10), px(r, 14)))
         left = tk.Frame(info, bg=C["bg"])
         left.pack(side="left", fill="x", expand=True)
         self._info_left = left
@@ -254,10 +257,13 @@ class App:
         title_row.pack(anchor="w")
         self.doc_label = tk.Label(title_row, text="", bg=C["bg"], fg=C["text"], font=f.heading, anchor="w")
         self.doc_label.pack(side="left")
-        self.dirty_label = tk.Label(title_row, text="", bg=C["bg"], fg=C["warn"], font=f.small_bold)
-        self.dirty_label.pack(side="left", padx=(px(r, 10), 0))
-        self.doc_sub = tk.Label(left, text="", bg=C["bg"], fg=C["muted"], font=f.small, anchor="w")
-        self.doc_sub.pack(anchor="w")
+        # zweite Zeile: "● nicht gespeichert   Sinumerik · Empfangen von …"
+        sub_row = tk.Frame(left, bg=C["bg"])
+        sub_row.pack(anchor="w")
+        self.dirty_label = tk.Label(sub_row, text="", bg=C["bg"], fg=C["warn"], font=f.small_bold)
+        self.dirty_label.pack(side="left")
+        self.doc_sub = tk.Label(sub_row, text="", bg=C["bg"], fg=C["muted"], font=f.small, anchor="w")
+        self.doc_sub.pack(side="left")
         # Sprungliste, wenn mehrere (Unter-)Programme in einer Datei stehen
         self.progs_btn = ttk.Button(info, text="", style="Small.TButton", command=self._show_program_menu)
 
@@ -326,6 +332,11 @@ class App:
                                        command=self.save_as)
         add(self.saveas_btn, gap=14)
 
+        add(self._section(side, "BEARBEITEN"), gap=4)
+        self.compact_btn = ActionButton(side, f, "Zusammenrücken", subtitle="Leerzeilen raus · 2 vor Werkzeug",
+                                        kind="neutral", compact=True, command=self.compact)
+        add(self.compact_btn, gap=14)
+
         add(self._section(side, "ANSICHT"), gap=4)
         fr = row()
         self.find_btn = ActionButton(fr, f, "Suchen", kind="neutral", compact=True, anchor="center",
@@ -355,11 +366,12 @@ class App:
         self.status_frame.grid(row=0, column=0, sticky="ew")
         self.status_icon = tk.Label(self.status_frame, text="●", bg=C["surface"], fg=C["faint"], font=f.ui_bold)
         self.status_icon.pack(side="left", padx=(px(r, 12), px(r, 6)), pady=px(r, 10))
+        # Versionsnummer zuerst packen, damit lange Meldungen sie nicht überdecken
+        tk.Label(self.status_frame, text="Version " + APP_VERSION, bg=C["surface"], fg=C["faint"],
+                 font=f.small).pack(side="right", padx=px(r, 12))
         self.status_text = tk.Label(self.status_frame, text="Bereit.", bg=C["surface"], fg=C["text"], font=f.ui,
                                     anchor="w")
         self.status_text.pack(side="left", fill="x", expand=True)
-        tk.Label(self.status_frame, text="Version " + APP_VERSION, bg=C["surface"], fg=C["faint"],
-                 font=f.small).pack(side="right", padx=px(r, 12))
 
         # Übertragungsanzeige
         tf = tk.Frame(bar, bg=C["surface"], highlightthickness=1, highlightbackground=C["border"])
@@ -632,8 +644,9 @@ class App:
 
     def _set_busy(self, busy: bool) -> None:
         for b in (self.send_btn, self.recv_btn, self.open_btn, self.save_btn, self.saveas_btn, self.new_btn,
-                  self.machine_btn, self.machines_btn, self.connect_btn):
+                  self.compact_btn, self.machine_btn, self.machines_btn, self.connect_btn):
             b.set_enabled(not busy)
+        self.undo_btn.state(["disabled"] if busy else ["!disabled"])
         self.editor.set_readonly(busy)
 
     def _update_transfer_detail(self) -> None:
@@ -1082,6 +1095,44 @@ class App:
             self.root.after_cancel(self._analyze_job)
         self._analyze_job = self.root.after(700, self._reanalyze)
 
+    def compact(self) -> None:
+        """Leerzeilen entfernen, vor jedem Werkzeugaufruf zwei Leerzeilen (rückgängig machbar)."""
+        if self.busy:
+            return
+        text = self.editor.get_text()
+        if not text.strip():
+            dialogs.info(self.root, self.fonts, "Nichts zu bearbeiten", "Der Editor ist leer.")
+            return
+        dialect = analyze_program(text).dialect
+        r = compact_program(text, dialect=dialect)
+        if r.text == text:
+            self.set_status("Das Programm ist schon zusammengerückt.", "info")
+            return
+        self.editor.replace_all(r.text)
+        self.dirty = True
+        self._reanalyze()
+        if dialect == "heidenhain":
+            msg = "✓  {} Leerzeilen entfernt. Bei Heidenhain sind keine Leerzeilen erlaubt, deshalb kein Abstand " \
+                  "vor Werkzeugen.".format(fmt_int(r.removed))
+        else:
+            msg = "✓  Zusammengerückt: {} Leerzeilen entfernt, Abstand vor {} Werkzeugen".format(
+                fmt_int(r.removed), fmt_int(r.tool_gaps))
+            if r.program_gaps:
+                msg += " und {} Programmen".format(fmt_int(r.program_gaps))
+            msg += "."
+        self.set_status(msg + "  Zurück mit „↶ Rückgängig“.", "ok")
+
+    def undo(self) -> None:
+        if self.busy:
+            return
+        try:
+            self.editor.text.edit_undo()
+        except tk.TclError:
+            self.set_status("Es gibt nichts mehr rückgängig zu machen.", "info")
+            return
+        self.editor.schedule_refresh()
+        self._on_editor_change()
+
     def _reanalyze(self) -> None:
         """Name, Steuerung und enthaltene Programme ermitteln und anzeigen."""
         self._analyze_job = None
@@ -1129,7 +1180,7 @@ class App:
             name = info.name or "Neues Programm"
         has_text = not self.editor.is_empty()
         self.doc_label.configure(text=name)
-        self.dirty_label.configure(text="●  nicht gespeichert" if self.dirty and has_text else "")
+        self.dirty_label.configure(text="●  nicht gespeichert    " if self.dirty and has_text else "")
         parts = []
         if unsaved_receive:
             parts.append("Empfangen von " + self.machine.display_name)

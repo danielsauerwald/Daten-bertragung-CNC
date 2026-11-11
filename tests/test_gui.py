@@ -275,7 +275,7 @@ def test_all_buttons_visible_on_tablet_screen(app):
         time.sleep(0.05)
     bottom = app.root.winfo_rooty() + app.root.winfo_height()
     right = app.root.winfo_rootx() + app.root.winfo_width()
-    for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "find_btn",
+    for name in ("send_btn", "recv_btn", "open_btn", "new_btn", "save_btn", "saveas_btn", "compact_btn", "find_btn",
                  "zoom_out_btn", "zoom_in_btn", "panel_btn", "machines_btn", "connect_btn", "machine_btn"):
         w = getattr(app, name)
         assert w.winfo_ismapped(), name
@@ -322,3 +322,25 @@ def test_touch_keyboard_opens_when_input_is_tapped(app, monkeypatch):
 
     app.cfg.touch_keyboard = False               # Einstellung aus
     assert tap(app.search_entry) == 0
+
+
+def test_compact_button_and_undo(app):
+    from cnc_dnc.textutil import load_program_file
+
+    original = load_program_file(os.path.join(os.path.dirname(__file__), "data", "METLOG_300069.txt"))
+    app.editor.set_text(original)
+    app.dirty = False
+    app.compact()
+    app.root.update()
+    text = app.editor.get_text()
+    assert "\n\n\n\n" not in text and "G40 G00 X150 Z130\n\n\n;FERTIGDREHEN VCMT04\n" in text
+    assert app.dirty
+    assert "Zusammengerückt" in app.status_text.cget("text")
+    # ein Tipp auf "Rückgängig" holt den alten Stand komplett zurück
+    app.undo()
+    app.root.update()
+    assert app.editor.get_text() == original
+    # nochmal zusammenrücken -> gleiches Ergebnis; zweites Mal ändert nichts
+    app.compact()
+    app.compact()
+    assert "schon zusammengerückt" in app.status_text.cget("text")

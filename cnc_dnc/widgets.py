@@ -260,6 +260,21 @@ class CodeEditor(tk.Frame):
             self.text.configure(state="disabled")
         self.schedule_refresh()
 
+    def replace_all(self, content: str) -> None:
+        """Ganzen Text ersetzen – als *ein* Schritt rückgängig machbar, Ansicht bleibt ungefähr."""
+        top_line = int(self.text.index("@0,0").split(".")[0])
+        self.text.configure(autoseparators=False)
+        try:
+            self.text.edit_separator()
+            self.text.delete("1.0", "end-1c")
+            self.text.insert("1.0", content)
+            self.text.edit_separator()
+        finally:
+            self.text.configure(autoseparators=True)
+        self.text.mark_set("insert", "{}.0".format(top_line))
+        self.text.yview("{}.0".format(top_line))
+        self.schedule_refresh()
+
     def append(self, content: str, follow: bool = True) -> None:
         was_disabled = self.text.cget("state") == "disabled"
         self.text.configure(state="normal")

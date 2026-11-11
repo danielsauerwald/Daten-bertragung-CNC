@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.3
+# CNC-Datenübertragung 2.4
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -33,6 +33,8 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
   (z. B. ABSTECH, KANAL1, KANAL2 … in einem Sinumerik-Werkstück), springt man über
   „≡ 8 Programme ▾“ direkt dorthin.
 - **Kundenordner wird beim Speichern vorgeschlagen**, siehe [Kundenordner](#kundenordner).
+- **Zusammenrücken** auf Knopfdruck: Leerzeilen raus, vor jedem Werkzeug zwei Leerzeilen,
+  siehe [Zusammenrücken](#zusammenrücken).
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
 - **LEDs für die Steuerleitungen** CTS, DSR, CD und RI sowie TX/RX, wie im alten Programm.
 - **Warnung vor Sonderzeichen** (ä, ö, ü, Ø …), die viele Steuerungen mit Alarm ablehnen.
@@ -144,6 +146,25 @@ Beim **Speichern** wählt das Programm den Ordner selbst vor. Dabei gilt diese R
 
 Im Speichern-Fenster lässt sich der Ordner aus einer Liste aller Kundenordner antippen.
 Mit **+ Neuer Ordner** legt man einen neuen Kundenordner an.
+
+## Zusammenrücken
+
+Die Taste **Zusammenrücken** (rechts unter „BEARBEITEN“) räumt das Programm auf:
+
+- **Alle Leerzeilen werden entfernt**, ebenso Leerzeichen am Zeilenende. Leerzeichen
+  *innerhalb* einer Zeile (`G01 X10 Z-5`) bleiben, die braucht die Steuerung.
+- **Vor jedem Werkzeugaufruf stehen danach genau zwei Leerzeilen.** Als Werkzeugaufruf
+  zählen z. B. `T12D1`, `N30 T01 M06`, `T="BOHRER"` und `TOOL CALL`, nicht aber ein
+  Kommentar wie `(WERKZEUG T01)`.
+- **Kommentarzeilen direkt über dem Werkzeug** (z. B. `;FERTIGDREHEN VCMT04`) bleiben
+  beim Werkzeug. Die zwei Leerzeilen kommen über den Kommentar.
+- **Direkt nach einem Programmkopf** (`%_N_…_MPF`, `;$PATH=…`, `O1234`) kommt kein Abstand.
+- **Mehrere Programme in einer Datei** (Sinumerik-Werkstück) bleiben durch zwei
+  Leerzeilen vor jedem weiteren `%_N_…`-Kopf getrennt.
+- **Heidenhain** erlaubt keine Leerzeilen. Dort werden nur Leerzeilen entfernt.
+
+Zweimal Zusammenrücken ändert nichts mehr. Mit **↶ Rückgängig** über dem Editor holt man
+den alten Stand mit einem Tipp zurück. Gespeichert wird erst mit „Speichern“.
 
 ## Warum sind die Zeilen früher verrutscht?
 

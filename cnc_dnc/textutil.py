@@ -388,6 +388,119 @@ def detect_program_name(text: str) -> Optional[str]:
     return analyze_program(text).name
 
 
+# --------------------------------------------------------------------------
+# Programm zusammenrücken
+# --------------------------------------------------------------------------
+
+_TOOL_CALL = re.compile(r"(?<![A-Za-z_$])T\s*(?:=|\d)|\bTOOL\s+CALL\b", re.IGNORECASE)
+_CODE_ONLY = re.compile(r"\([^)]*\)|;.*$|\"[^\"]*\"")
+
+
+def _is_comment_only(s: str) -> bool:
+    return s.startswith(";") or (s.startswith("(") and s.endswith(")"))
+
+
+def _is_path_line(s: str) -> bool:
+    return bool(_SIN_PATH.match(s))
+
+
+def _is_program_header(s: str) -> bool:
+    if s.startswith("%"):
+        return s != "%"
+    return bool(_FANUC_O.match(s) or _FANUC_NAME.match(s) or _HEID_HEAD.match(s))
+
+
+def is_tool_call(line: str) -> bool:
+    """Wird in dieser Zeile ein Werkzeug aufgerufen? (T12D1, T01 M06, T="BOHRER", TOOL CALL 5)
+
+    Kommentare zählen nicht: ``(WERKZEUG T01)`` ist kein Werkzeugaufruf.
+    """
+    return bool(_TOOL_CALL.search(_CODE_ONLY.sub("", line)))
+
+
+class CompactResult:
+    def __init__(self, text: str, removed: int, tool_gaps: int, program_gaps: int, tools: int) -> None:
+        self.text = text
+        self.removed = removed            # entfernte Leerzeilen (aus dem Original)
+        self.tool_gaps = tool_gaps        # Abstand vor Werkzeugaufrufen eingefügt
+        self.program_gaps = program_gaps  # Abstand vor weiteren Programmen eingefügt
+        self.tools = tools                # gefundene Werkzeugaufrufe
+
+
+def compact_program(text: str, blank_lines: int = 2, dialect: Optional[str] = None) -> CompactResult:
+    """Leerzeilen entfernen, nur vor Werkzeugaufrufen ``blank_lines`` Leerzeilen lassen.
+
+    - Kommentarzeilen direkt über einem Werkzeug (z. B. ``;FERTIGDREHEN VCMT04``)
+      gehören zum Werkzeug – der Abstand kommt über den Kommentar.
+    - Direkt nach einem Programmkopf (``%_N_..._MPF``, ``;$PATH=``, ``O1234``)
+      wird kein Abstand eingefügt.
+    - Vor jedem weiteren Programm einer Datei (z. B. ``%_N_KANAL2_MPF``) kommt
+      ebenfalls Abstand, damit die Unterprogramme getrennt bleiben.
+    - Heidenhain: Leerzeilen sind dort nicht erlaubt, es werden nur welche entfernt.
+    - Leerzeichen am Zeilenende werden entfernt, Leerzeichen innerhalb der Zeile nicht.
+    """
+    if dialect == "heidenhain":
+        blank_lines = 0
+    norm = normalize_text(text, strip_control=False)
+    ends_with_newline = norm.endswith("\n")
+    lines = [ln.rstrip() for ln in norm.split("\n")]
+    if ends_with_newline:
+        lines.pop()
+    removed = sum(1 for ln in lines if not ln.strip())
+    gap = [""] * blank_lines
+
+    out: List[str] = []
+    gaps = {"tool": 0, "program": 0}
+    tools = 0
+    has_content = False   # schon richtiger Programminhalt da (nicht nur "%")?
+    header_zone = True    # direkt nach Programmanfang/-kopf: kein Abstand
+
+    def insert_gap(position: int, kind: str) -> None:
+        if not blank_lines:
+            return
+        out[position:position] = gap
+        gaps[kind] += 1
+
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        if s == "%":
+            out.append(ln)
+            continue
+        if _is_program_header(s):
+            if has_content:
+                insert_gap(len(out), "program")
+            out.append(ln)
+            has_content = True
+            header_zone = True
+            continue
+        if _is_path_line(s):
+            out.append(ln)
+            has_content = True
+            continue
+        if is_tool_call(s):
+            tools += 1
+            if not header_zone and has_content:
+                # Kommentarzeilen direkt darüber gehören zum Werkzeug
+                pos = len(out)
+                while pos > 0 and out[pos - 1].strip() and _is_comment_only(out[pos - 1].strip()) \
+                        and not _is_path_line(out[pos - 1].strip()):
+                    pos -= 1
+                insert_gap(pos, "tool")
+            out.append(ln)
+            has_content = True
+            header_zone = False
+            continue
+        out.append(ln)
+        has_content = True
+        if not _is_comment_only(s):
+            header_zone = False
+
+    result = "\n".join(out) + ("\n" if ends_with_newline and out else "")
+    return CompactResult(result, removed, gaps["tool"], gaps["program"], tools)
+
+
 def count_lines(text: str) -> int:
     if not text:
         return 0
