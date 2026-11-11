@@ -83,6 +83,16 @@ def main(argv=None) -> int:
         from .textutil import normalize_text
 
         assert normalize_text("%\n\r\rO1\n\r\r%\n\r\r") == "%\nO1\n%\n"
+        # Einrichteblatt: Module vorhanden (auch in der EXE) und PDF-Erzeugung klappt
+        from .setup_dialog import SetupSheetDialog  # noqa: F401
+        from .setupsheet import SheetData, extract_tools
+        from .setupsheet_pdf import SheetContext, render_setup_sheet
+
+        sample = "%_N_KANAL1_MPF\n;VORDREHEN\nT1D1\nM17\n%_N_KANAL2_MPF\n;PLANEN\nT2D1\nM17\n"
+        pdf = os.path.join(os.path.dirname(cfg_path), "selbsttest.pdf")
+        render_setup_sheet(pdf, SheetContext("SELBSTTEST", "Maschine", "Kunde", "x.txt"),
+                           extract_tools(sample), [], SheetData())
+        assert open(pdf, "rb").read(8) == b"%PDF-1.4"
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)
