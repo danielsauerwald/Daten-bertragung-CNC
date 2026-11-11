@@ -459,7 +459,8 @@ def test_correction_sheet_in_dialog(app, tmp_path, monkeypatch):
     monkeypatch.setattr(sd_mod, "open_external", lambda p: True)
     # Anschlag (T11) im Formular auf Seite 2 setzen
     monkeypatch.setattr(dialogs.FormDialog, "show",
-                        lambda self: {"side": "Seite 2", "name": "ANSCHLAG", "remark": "auf S2 umgebaut"})
+                        lambda self: {"side": "Seite 2", "function": "ANSCHLAG", "tool": "ANSCHLAGBOLZEN",
+                                      "remark": "auf S2 umgebaut"})
 
     def fake_show(self):
         s1 = self.korr_trees[1]
@@ -476,7 +477,8 @@ def test_correction_sheet_in_dialog(app, tmp_path, monkeypatch):
     monkeypatch.setattr(SetupSheetDialog, "show", fake_show)
     app.setup_sheet()
     assert os.path.exists(os.path.join(root, "Metlog", "METLOG_300069_Korrekturblatt.pdf"))
-    assert load_sheet(prog).korrektur["0|T11"] == {"side": 2, "name": "ANSCHLAG", "remark": "auf S2 umgebaut"}
+    # Funktion war schon "ANSCHLAG" (unverändert -> nicht gespeichert), Werkzeug neu eingetragen
+    assert load_sheet(prog).korrektur["0|T11"] == {"side": 2, "tool": "ANSCHLAGBOLZEN", "remark": "auf S2 umgebaut"}
 
 
 def test_merged_row_edit_moves_both_parts(app, tmp_path, monkeypatch):
@@ -497,10 +499,35 @@ def test_merged_row_edit_moves_both_parts(app, tmp_path, monkeypatch):
     assert tools == ["T1", "T12"]
     iid = s1.get_children()[1]
     s1.identify_row = lambda y: iid
-    monkeypatch.setattr(dialogs.FormDialog, "show", lambda self: {"side": "Seite 2", "name": "ABSTECH",
-                                                                    "remark": ""})
+    monkeypatch.setattr(dialogs.FormDialog, "show", lambda self: {"side": "Seite 2", "function": "ABSTECHEN",
+                                                                    "tool": "", "remark": ""})
     d._edit_korr(s1, type("Tap", (), {"y": 0})())
     assert [s1.item(i, "values")[0] for i in s1.get_children()] == ["T1"]
     s2 = d.korr_trees[2]
     assert [s2.item(i, "values")[0] for i in s2.get_children()].count("T12") == 1
     d.destroy()
+
+
+def test_correction_sheet_orientation_is_remembered(app, tmp_path, monkeypatch):
+    import cnc_dnc.setup_dialog as sd_mod
+    from cnc_dnc.setup_dialog import SetupSheetDialog
+
+    prog = tmp_path / "TEIL.txt"
+    prog.write_text("%_N_KANAL1_MPF\n;VORDREHEN VNMG08\nT01D1\nM17\n")
+    app.open_file(str(prog))
+    monkeypatch.setattr(sd_mod, "open_external", lambda p: True)
+    assert app.cfg.korr_landscape is False
+
+    def fake_show(self):
+        s1 = self.korr_trees[1]
+        assert s1.item(s1.get_children()[0], "values")[:3] == ("T1", "VORDREHEN", "VNMG08")
+        self.orient_var.set("quer")
+        self._orient_changed()
+        self.make_pdf("korr")
+        return self.result
+
+    monkeypatch.setattr(SetupSheetDialog, "show", fake_show)
+    app.setup_sheet()
+    pdf = tmp_path / "TEIL_Korrekturblatt.pdf"
+    assert b"/MediaBox [0 0 841.89 595.28]" in pdf.read_bytes()  # quer
+    assert app.cfg.korr_landscape is True                         # gemerkt

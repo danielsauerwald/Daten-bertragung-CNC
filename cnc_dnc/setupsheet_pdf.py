@@ -41,16 +41,24 @@ class _Layout:
         self.y = M
         self._on_new_page = None
 
+    @property
+    def W(self) -> float:  # noqa: N802 (wie die Konstante)
+        return self.doc.width
+
+    @property
+    def bottom(self) -> float:
+        return self.doc.height - 40.0
+
     def ensure(self, height: float) -> bool:
         """Platz prüfen; sonst neue Seite. Liefert True, wenn umgebrochen wurde."""
-        if self.y + height <= BOTTOM:
+        if self.y + height <= self.bottom:
             return False
         self.doc.new_page()
         self.y = M
         d = self.doc
         d.text(M, self.y + 12, self.label, 8, bold=True, color=MUTED)
         d.text(M + 98, self.y + 12, self.ctx.program + "  (Fortsetzung)", 10, bold=True, color=TEXT)
-        d.line(M, self.y + 20, W - M, self.y + 20, 0.6, GRID)
+        d.line(M, self.y + 20, self.W - M, self.y + 20, 0.6, GRID)
         self.y += 30
         if self._on_new_page:
             self._on_new_page()
@@ -76,6 +84,7 @@ class _Layout:
 
 def _draw_header(lay: _Layout) -> None:
     d, ctx = lay.doc, lay.ctx
+    W = lay.W  # noqa: N806
     h = 56.0
     d.rect(M, lay.y, W - 2 * M, h, fill=DARK)
     d.text(M + 14, lay.y + 19, lay.label, 8.5, bold=True, color=FAINT)
@@ -242,6 +251,7 @@ def _draw_notes(lay: _Layout, notes: str) -> None:
 
 
 def _draw_footers(doc: PdfDocument, ctx: SheetContext, label: str = "Einrichteblatt") -> None:
+    W, H = doc.width, doc.height  # noqa: N806
     n = len(doc.pages)
     for i in range(n):
         doc.set_page(i)
@@ -297,10 +307,11 @@ def render_setup_sheet(path: str, ctx: SheetContext, tools: List[ToolUse], param
 # Korrekturblatt: Seite 1 links, Seite 2 rechts, viel Platz für Bemerkungen
 # --------------------------------------------------------------------------
 
-def _wrap_lines(text: str, width: float, size: float, bold: bool, max_lines: int) -> List[str]:
+def _wrap_lines(text: str, width: float, size: float, bold: bool, max_lines: int,
+                shrink: bool = False) -> List[str]:
     lines = []
     for ln in wrap_text(text, width, size, bold):
-        lines.append(fit_text(ln, width, size, bold, min_size=size)[0])
+        lines.append(ln if shrink else fit_text(ln, width, size, bold, min_size=size)[0])
     if len(lines) > max_lines:
         lines = lines[:max_lines]
         lines[-1] = fit_text(lines[-1] + " …", width, size, bold, min_size=size)[0]
@@ -308,10 +319,15 @@ def _wrap_lines(text: str, width: float, size: float, bold: bool, max_lines: int
 
 
 def render_correction_sheet(path: str, ctx: SheetContext, rows: Dict[int, List[KorrRow]], data: SheetData,
-                            min_rows: int = 12) -> None:
-    """A4 hoch: zwei Spalten (Seite 1 | Seite 2), je Werkzeug eine hohe Zeile mit Bemerkungsfeld."""
-    doc = PdfDocument(title="Korrekturblatt " + ctx.program)
+                            min_rows: int = 12, landscape: bool = False) -> None:
+    """Korrekturblatt: Seite 1 links, Seite 2 rechts; je Werkzeug T, Funktion, Werkzeug, Bemerkung.
+
+    ``landscape``: A4 quer (breitere Spalten) statt hochkant (höhere Zeilen).
+    """
+    size = (A4[1], A4[0]) if landscape else A4
+    doc = PdfDocument(title="Korrekturblatt " + ctx.program, size=size)
     lay = _Layout(doc, ctx, label="KORREKTURBLATT")
+    W = doc.width  # noqa: N806
     _draw_header(lay)
     f = data.fields
     info = [(lbl, f.get(key, "")) for lbl, key in (("Teil", "teil"), ("Zeichnungs-Nr.", "zeichnung"),
@@ -322,22 +338,24 @@ def render_correction_sheet(path: str, ctx: SheetContext, rows: Dict[int, List[K
         for lbl, v in info:
             doc.text(x, lay.y + 8, lbl, 7.5, color=MUTED)
             lw = string_width(lbl, 7.5) + 6
-            vv, size = fit_text(v, 170 - lw, 9.5, bold=True)
-            doc.text(x + lw, lay.y + 8, vv, size, bold=True, color=TEXT)
-            x += 175
+            vv, size_ = fit_text(v, 170 - lw, 9.5, bold=True)
+            doc.text(x + lw, lay.y + 8, vv, size_, bold=True, color=TEXT)
+            x += 185
         lay.y += 18
 
-    gap = 14.0
+    gap = 16.0 if landscape else 12.0
     colw = (W - 2 * M - gap) / 2
-    tool_w = 104.0
-    rem_w = colw - tool_w
+    t_w = 40.0 if landscape else 32.0
+    func_w = colw * (0.29 if landscape else 0.33)
+    tool_w = colw * (0.22 if landscape else 0.21)
+    rem_w = colw - t_w - func_w - tool_w
     n = max(min_rows, len(rows.get(1, [])), len(rows.get(2, [])))
     head_h = 24.0 + 16.0
-    avail = BOTTOM - lay.y - head_h
-    row_h = max(30.0, min(58.0, avail / n))
+    avail = lay.bottom - lay.y - head_h
+    row_h = max(26.0, min(58.0, avail / n))
 
     def subtitle(side: int) -> str:
-        progs = []
+        progs: List[str] = []
         for r in rows.get(side, []):
             for p in r.programs.split(", "):
                 if p and p not in progs:
@@ -349,33 +367,42 @@ def render_correction_sheet(path: str, ctx: SheetContext, rows: Dict[int, List[K
             x = M + i * (colw + gap)
             doc.rect(x, lay.y, colw, 24, fill=DARK)
             doc.text(x + 8, lay.y + 16.5, "SEITE {}".format(side), 12, bold=True, color=WHITE)
-            sub_t, size = fit_text(subtitle(side), colw - 90, 7.5)
-            doc.text(x + colw - 8, lay.y + 16, sub_t, size, color=FAINT, align="right")
-            lay.cell(x, lay.y + 24, tool_w, 16, "Werkzeug", 7.5, bold=True, bg=HEAD_BG, color=MUTED)
-            lay.cell(x + tool_w, lay.y + 24, rem_w, 16, "Bemerkung", 7.5, bold=True, bg=HEAD_BG, color=MUTED)
+            sub_t, size_ = fit_text(subtitle(side), colw - 90, 7.5)
+            doc.text(x + colw - 8, lay.y + 16, sub_t, size_, color=FAINT, align="right")
+            yy = lay.y + 24
+            lay.cell(x, yy, t_w, 16, "T", 7.5, bold=True, bg=HEAD_BG, color=MUTED, align="center")
+            lay.cell(x + t_w, yy, func_w, 16, "Funktion", 7.5, bold=True, bg=HEAD_BG, color=MUTED)
+            lay.cell(x + t_w + func_w, yy, tool_w, 16, "Werkzeug", 7.5, bold=True, bg=HEAD_BG, color=MUTED)
+            lay.cell(x + t_w + func_w + tool_w, yy, rem_w, 16, "Bemerkung", 7.5, bold=True, bg=HEAD_BG,
+                     color=MUTED)
         lay.y += head_h
 
     heads()
     lay._on_new_page = heads
-    name_size = 8.0
+    line_h = 10.0
+    max_lines = max(1, int((row_h - 8) // line_h))
     for i in range(n):
         lay.ensure(row_h)
         for c, side in enumerate((1, 2)):
             x = M + c * (colw + gap)
-            doc.rect(x, lay.y, tool_w, row_h, stroke=GRID, width=0.6)
-            doc.rect(x + tool_w, lay.y, rem_w, row_h, stroke=GRID, width=0.6)
+            xs = (x, x + t_w, x + t_w + func_w, x + t_w + func_w + tool_w)
+            ws = (t_w, func_w, tool_w, rem_w)
+            for k in range(4):
+                doc.rect(xs[k], lay.y, ws[k], row_h, stroke=GRID, width=0.6)
             side_rows = rows.get(side, [])
             if i >= len(side_rows):
                 continue
             r = side_rows[i]
-            doc.text(x + 8, lay.y + 18, r.tool, 15, bold=True, color=TEXT)
-            max_lines = max(1, int((row_h - 24) // 9.5))
-            for k, ln in enumerate(_wrap_lines(r.name, tool_w - 14, name_size, False, max_lines)):
-                doc.text(x + 8, lay.y + 30 + k * 9.5, ln, name_size, color=MUTED)
-            if r.remark:
-                rem_lines = max(1, int((row_h - 8) // 11))
-                for k, ln in enumerate(_wrap_lines(r.remark, rem_w - 12, 9.5, False, rem_lines)):
-                    doc.text(x + tool_w + 6, lay.y + 14 + k * 11, ln, 9.5, color=PRIMARY)
+            t_text, t_size = fit_text(r.tool, t_w - 6, 13 if landscape else 12, bold=True, min_size=8)
+            doc.text(x + t_w / 2, lay.y + 16, t_text, t_size, bold=True, color=TEXT, align="center")
+            for col, text, size_, bold, color in ((1, r.function, 9, True, TEXT), (2, r.tooltext, 8.5, False, MUTED),
+                                                  (3, r.remark, 9, False, PRIMARY)):
+                if not text:
+                    continue
+                for k, ln in enumerate(_wrap_lines(text, ws[col] - 10, size_, bold, max_lines, shrink=True)):
+                    # lange Einzelwörter (FERTIGDREHEN) etwas kleiner statt abgeschnitten
+                    t2, s2 = fit_text(ln, ws[col] - 10, size_, bold, min_size=size_ - 2)
+                    doc.text(xs[col] + 5, lay.y + 13 + k * line_h, t2, s2, bold=bold, color=color)
         lay.y += row_h
     lay._on_new_page = None
     _draw_footers(doc, ctx, "Korrekturblatt")

@@ -31,9 +31,10 @@ class SetupSheetDialog(Dialog):
     """Ergebnis: Pfad der erzeugten PDF, "saved" (nur gespeichert) oder None (abgebrochen)."""
 
     def __init__(self, parent, fonts: Fonts, ctx: SheetContext, program_path: str, tools: List[ToolUse],
-                 params: List[Parameter], data: SheetData) -> None:
+                 params: List[Parameter], data: SheetData, landscape: bool = False) -> None:
         super().__init__(parent, fonts, "Einrichte- & Korrekturblatt – " + ctx.program)
         self.ctx = ctx
+        self.landscape = landscape  # Korrekturblatt quer? (wird nach dem Schließen gemerkt)
         self.program_path = program_path
         self.tools = tools
         self.params = params
@@ -139,10 +140,20 @@ class SetupSheetDialog(Dialog):
     def _build_korr_tab(self) -> None:
         f = tk.Frame(self.nb, bg=C["surface"], padx=px(self, 14), pady=px(self, 12))
         self.nb.add(f, text="Korrekturblatt")
-        tk.Label(f, text="Seite 1 links, Seite 2 rechts. Abstechwerkzeug und Anschlag stehen automatisch auf "
-                         "Seite 1. Zeile antippen: Seite wechseln, Namen ändern oder Bemerkung eintragen.",
+        top = tk.Frame(f, bg=C["surface"])
+        top.pack(fill="x", pady=(0, px(self, 8)))
+        # Blatt hochkant oder quer
+        orient = tk.Frame(top, bg=C["surface"])
+        orient.pack(side="right", padx=(px(self, 12), 0))
+        tk.Label(orient, text="Blatt:", bg=C["surface"], fg=C["text"], font=self.fonts.ui_bold).pack(side="left")
+        self.orient_var = tk.StringVar(master=self, value="quer" if self.landscape else "hoch")
+        for value, label in (("hoch", "Hochkant"), ("quer", "Quer")):
+            ttk.Radiobutton(orient, text=label, value=value, variable=self.orient_var, style="Big.TRadiobutton",
+                            command=self._orient_changed).pack(side="left", padx=(px(self, 10), 0))
+        tk.Label(top, text="Seite 1 links, Seite 2 rechts. Abstechen und Anschlag stehen automatisch auf Seite 1. "
+                           "Zeile antippen: Seite wechseln, Funktion/Werkzeug ändern oder Bemerkung eintragen.",
                  bg=C["surface"], fg=C["muted"], font=self.fonts.ui, anchor="w", justify="left",
-                 wraplength=px(self, 1100)).pack(anchor="w", pady=(0, px(self, 8)))
+                 wraplength=px(self, 820)).pack(side="left", fill="x", expand=True)
         cols = tk.Frame(f, bg=C["surface"])
         cols.pack(fill="both", expand=True)
         self.korr_trees: Dict[int, ttk.Treeview] = {}
@@ -160,14 +171,16 @@ class SetupSheetDialog(Dialog):
             self.korr_titles[side] = count
             box = tk.Frame(cols, bg=C["surface"], highlightthickness=1, highlightbackground=C["border"])
             box.grid(row=1, column=i, sticky="nsew", padx=pad)
-            tree = ttk.Treeview(box, columns=("tool", "name", "remark"), show="headings", selectmode="browse",
-                                height=7)
+            tree = ttk.Treeview(box, columns=("tool", "func", "tooltext", "remark"), show="headings",
+                                selectmode="browse", height=7)
             tree.heading("tool", text="T", anchor="center")
-            tree.heading("name", text="WERKZEUG", anchor="w")
+            tree.heading("func", text="FUNKTION", anchor="w")
+            tree.heading("tooltext", text="WERKZEUG", anchor="w")
             tree.heading("remark", text="BEMERKUNG", anchor="w")
             tree.column("tool", width=px(self, 52), anchor="center", stretch=False)
-            tree.column("name", width=px(self, 250), anchor="w", stretch=True)
-            tree.column("remark", width=px(self, 200), anchor="w", stretch=True)
+            tree.column("func", width=px(self, 170), anchor="w", stretch=True)
+            tree.column("tooltext", width=px(self, 130), anchor="w", stretch=True)
+            tree.column("remark", width=px(self, 140), anchor="w", stretch=True)
             sb = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
             tree.configure(yscrollcommand=sb.set)
             tree.pack(side="left", fill="both", expand=True)
@@ -182,13 +195,16 @@ class SetupSheetDialog(Dialog):
         for side, tree in self.korr_trees.items():
             tree.delete(*tree.get_children())
             for r in rows[side]:
-                iid = tree.insert("", "end", values=(r.tool, r.name, r.remark))
+                iid = tree.insert("", "end", values=(r.tool, r.function, r.tooltext, r.remark))
                 self._korr_rows[str(tree) + iid] = r
             n = len(rows[side])
             text = "{} Werkzeuge".format(n) if n != 1 else "1 Werkzeug"
             if n > 12:
                 text += "  ·  mehr als 12 – Zeilen werden enger"
             self.korr_titles[side].configure(text=text)
+
+    def _orient_changed(self) -> None:
+        self.landscape = self.orient_var.get() == "quer"
 
     def _edit_korr(self, tree: ttk.Treeview, event) -> None:
         iid = tree.identify_row(event.y)
@@ -197,8 +213,9 @@ class SetupSheetDialog(Dialog):
             return
         res = FormDialog(self, self.fonts, "Korrekturblatt: {}".format(r.tool),
                          [("side", "Seite", "Seite {}".format(r.side), ("Seite 1", "Seite 2")),
-                          ("name", "Werkzeug", r.name), ("remark", "Bemerkung", r.remark)],
-                         message="Aus dem Programm: {}".format(r.programs or "–")).show()
+                          ("function", "Funktion", r.function), ("tool", "Werkzeug", r.tooltext),
+                          ("remark", "Bemerkung", r.remark)],
+                         message="Aus dem Programm: {}  ({})".format(r.name or "–", r.programs or "–")).show()
         if res is None:
             return
         side = 2 if res["side"] == "Seite 2" else 1
@@ -206,11 +223,12 @@ class SetupSheetDialog(Dialog):
             entry = self.data.korrektur.setdefault(k, {})
             entry["side"] = side  # zusammengefasste Zeile wandert komplett
             if k != r.key:
-                entry.pop("name", None)
-                entry.pop("remark", None)
+                for f in ("name", "function", "tool", "remark"):
+                    entry.pop(f, None)
         entry = self.data.korrektur[r.key]
-        if res["name"] != r.name or "name" in entry:
-            entry["name"] = res["name"]
+        for field, current in (("function", r.function), ("tool", r.tooltext)):
+            if res[field] != current or field in entry:
+                entry[field] = res[field]
         entry["remark"] = res["remark"]
         self._fill_korr()
 
@@ -309,7 +327,8 @@ class SetupSheetDialog(Dialog):
         try:
             save_sheet(self.program_path, self.data)
             if kind == "korr":
-                render_correction_sheet(target, self.ctx, korrektur_rows(self.tools, self.data), self.data)
+                render_correction_sheet(target, self.ctx, korrektur_rows(self.tools, self.data), self.data,
+                                        landscape=self.landscape)
             else:
                 render_setup_sheet(target, self.ctx, self.tools, self.params, self.data)
         except OSError as exc:

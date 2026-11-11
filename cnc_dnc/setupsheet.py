@@ -159,7 +159,7 @@ def extract_tools(text: str) -> List[ToolUse]:
             if side is None:
                 side = 0 if has_side_programs else 1
             if not desc and side == 0:
-                desc = program
+                desc = function_from_program(program)
             result.append(ToolUse(side, format_tool(s), desc, program, no))
         elif pending_comment and setup_lines < MAX_SETUP_LINES and is_setup_line(s):
             setup_lines += 1  # z. B. M5 zwischen ";FRAESEN 5MM" und dem Werkzeug
@@ -188,18 +188,94 @@ def _borrow_descriptions(tools: List[ToolUse]) -> List[ToolUse]:
     return out
 
 
+# Unterprogrammname -> Funktion des Werkzeugs (UEBERGABE, STANGENWECHSEL … sind keine Funktion)
+_PROGRAM_FUNCTIONS = [
+    ("ABSTECH", "ABSTECHEN"), ("ANSCHLAG", "ANSCHLAG"), ("EINSTECH", "EINSTECHEN"), ("GEWINDE", "GEWINDE"),
+    ("BOHR", "BOHREN"), ("FRAES", "FRAESEN"), ("ENTGRAT", "ENTGRATEN"), ("PLAN", "PLANEN"),
+]
+
+
+def function_from_program(program: str) -> str:
+    up = (program or "").upper()
+    for key, func in _PROGRAM_FUNCTIONS:
+        if key in up:
+            return func
+    return ""
+
+
+# --------------------------------------------------------------------------
+# Bezeichnung aufteilen: Funktion ("VORDREHEN") und Werkzeug ("VNMG08", "Ø12")
+# --------------------------------------------------------------------------
+
+# Werkzeugart -> Funktion (falls der Kommentar nur das Werkzeug nennt, z. B. "FRAESER 20")
+TOOL_TYPES = {
+    "BOHRER": "BOHREN", "WENDEPLATTENBOHRER": "BOHREN", "SPIRALBOHRER": "BOHREN", "VHM-BOHRER": "BOHREN",
+    "ZENTRIERBOHRER": "ZENTRIEREN", "ANBOHRER": "ANBOHREN", "NC-ANBOHRER": "ANBOHREN",
+    "FRAESER": "FRAESEN", "SCHAFTFRAESER": "FRAESEN", "KUGELFRAESER": "FRAESEN", "PLANFRAESER": "PLANFRAESEN",
+    "GEWINDEBOHRER": "GEWINDEBOHREN", "GEWINDEFRAESER": "GEWINDEFRAESEN", "SENKER": "SENKEN",
+    "REIBAHLE": "REIBEN", "STECHPLATTE": "EINSTECHEN", "STECHER": "EINSTECHEN", "ECOCUT": "",
+}
+# ISO-Wendeschneidplatte: Form, Freiwinkel, Toleranz, Art – z. B. DCMT08, VNMG080408-PM
+_ISO_INSERT = re.compile(r"^[CDKRSTVW][ABCDEFNOP][ACEFGHJKLMNU][ABGHJMNQRTUWX](?:\d[0-9A-Z.\-]*)?$")
+_DIAMETER = re.compile(r"^(?:Ø|D|DM)?(\d+(?:[.,]\d+)?)(?:MM)?$", re.IGNORECASE)
+_THREAD = re.compile(r"^M\d+(?:[X.,]\d+(?:[.,]\d+)?)*(?:LH|RH)?$", re.IGNORECASE)
+_RADIUS = re.compile(r"^R\d+(?:[.,]\d+)?$", re.IGNORECASE)
+
+
+def _tool_token(tok: str) -> Optional[str]:
+    """Token als Werkzeugangabe erkennen und aufbereiten, sonst None."""
+    up = tok.upper()
+    if up in TOOL_TYPES or _ISO_INSERT.match(up) or _THREAD.match(up) or _RADIUS.match(up):
+        return tok
+    m = _DIAMETER.match(tok)
+    if m:
+        return "Ø" + m.group(1)
+    return None
+
+
+def split_description(desc: str) -> Tuple[str, str]:
+    """"VORDREHEN VNMG08" -> ("VORDREHEN", "VNMG08"); "BOHREN 12" -> ("BOHREN", "Ø12").
+
+    Mehrere Teile ("SCHLICHTEN DCMT04 / GEWINDE M22X1.5") werden einzeln aufgeteilt.
+    """
+    funcs: List[str] = []
+    tools: List[str] = []
+    for part in [p.strip() for p in desc.split(" / ") if p.strip()]:
+        tokens = part.split()
+        idx = next((i for i, t in enumerate(tokens) if _tool_token(t) is not None), None)
+        if idx is None:
+            func, tool = part, ""
+        else:
+            func = " ".join(tokens[:idx])
+            rest = tokens[idx:]
+            if not func:
+                func = TOOL_TYPES.get(tokens[0].upper(), "")
+            if not func:
+                # Werkzeug zuerst ("DCMT11T304 SCHLICHTEN"): hintere Wörter sind die Funktion
+                k = len(rest)
+                while k > 1 and _tool_token(rest[k - 1]) is None:
+                    k -= 1
+                func, rest = " ".join(rest[k:]), rest[:k]
+            tool = " ".join(_tool_token(t) or t for t in rest)
+        if func and func not in funcs:
+            funcs.append(func)
+        if tool and tool not in tools:
+            tools.append(tool)
+    return " / ".join(funcs), " / ".join(tools)
+
+
 def _dedupe(tools: List[ToolUse]) -> List[ToolUse]:
     seen = set()
     out: List[ToolUse] = []
     merged: Dict[str, int] = {}
     for t in tools:
         if t.side == 0:
-            # weitere Programme: gleiches Werkzeug nur einmal, Programme zusammenfassen
+            # weitere Programme: gleiches Werkzeug nur einmal; die erste Funktion zählt
+            # (T12 in ABSTECH, UEBERGABE, STANGENWECHSEL -> "ABSTECHEN")
             if t.tool in merged:
                 i = merged[t.tool]
-                old = out[i]
-                if t.description and t.description not in old.description.split(" / "):
-                    out[i] = old._replace(description=(old.description + " / " + t.description).strip(" /"))
+                if not out[i].description and t.description:
+                    out[i] = out[i]._replace(description=t.description)
                 continue
             merged[t.tool] = len(out)
             out.append(t)
@@ -318,7 +394,7 @@ class SheetData:
                     entry: Dict[str, object] = {}
                     if v.get("side") in (1, 2):
                         entry["side"] = int(v["side"])
-                    for f in ("name", "remark"):
+                    for f in ("name", "function", "tool", "remark"):
                         if v.get(f) is not None:
                             entry[f] = str(v[f])
                     sd.korrektur[str(k)] = entry
@@ -369,6 +445,8 @@ class KorrRow(NamedTuple):
     origin: int        # Seite laut Programm (0 = weiteres Programm, z. B. ABSTECH)
     programs: str      # "KANAL1" oder "ABSTECH, UEBERGABE"
     keys: Tuple[str, ...] = ()  # alle zusammengefassten Schlüssel (z. B. "1|T12" und "0|T12")
+    function: str = ""          # Funktion, z. B. "VORDREHEN" (aus der Bezeichnung oder selbst eingetragen)
+    tooltext: str = ""          # Werkzeug, z. B. "VNMG08", "Ø12"
 
 
 def _tool_sort_key(tool: str):
@@ -445,8 +523,15 @@ def korrektur_rows(tools: List[ToolUse], data: SheetData) -> Dict[int, List[Korr
         name = overridden[0] if overridden else " / ".join(unique(m.name for m in members))
         remark = " / ".join(r for r in dict.fromkeys(m.remark for m in members) if r)
         programs = ", ".join(unique(p for m in members for p in m.programs.split(", ")))
+        # Funktion und Werkzeug: automatisch aus der Bezeichnung, selbst eingetragen hat Vorrang
+        function, tooltext = split_description(name)
+        own = data.korrektur.get(primary.key, {})
+        if own.get("function") is not None:
+            function = str(own["function"])
+        if own.get("tool") is not None:
+            tooltext = str(own["tool"])
         rows.append((pos, KorrRow(primary.key, tool, name, remark, side, primary.origin, programs,
-                                  tuple(m.key for m in members))))
+                                  tuple(m.key for m in members), function, tooltext)))
     result: Dict[int, List[KorrRow]] = {1: [], 2: []}
     for _pos, r in sorted(rows, key=lambda x: x[0]):
         result[r.side].append(r)

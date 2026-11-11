@@ -168,6 +168,7 @@ class AppConfig:
     # zuletzt gewählte Satznummerierung
     renumber_scheme: str = "tool"
     renumber_step: int = 10
+    korr_landscape: bool = False  # Korrekturblatt quer statt hochkant
     geometry: str = ""
 
     path: str = field(default="", repr=False, compare=False)
@@ -219,6 +220,7 @@ class AppConfig:
         cfg.show_file_panel = bool(data.get("show_file_panel", True))
         cfg.touch_keyboard = bool(data.get("touch_keyboard", True))
         cfg.touch_keyboard_editor = bool(data.get("touch_keyboard_editor", False))
+        cfg.korr_landscape = bool(data.get("korr_landscape", False))
         if data.get("renumber_scheme") in ("tool", "flat", "toolonly", "remove"):
             cfg.renumber_scheme = data["renumber_scheme"]
         try:
@@ -240,6 +242,7 @@ class AppConfig:
             "touch_keyboard_editor": self.touch_keyboard_editor,
             "renumber_scheme": self.renumber_scheme,
             "renumber_step": self.renumber_step,
+            "korr_landscape": self.korr_landscape,
             "geometry": self.geometry,
             "machines": [asdict(m) for m in self.machines],
         }

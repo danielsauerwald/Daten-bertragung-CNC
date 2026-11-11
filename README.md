@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.7.2
+# CNC-Datenübertragung 2.8
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -243,23 +243,40 @@ der Dateiliste angezeigt, Antippen öffnet sie im PDF-Programm) und
 ## Korrekturblatt
 
 Im selben Fenster gibt es den Reiter **Korrekturblatt** und unten die Taste
-**Korrekturblatt-PDF**. Das Blatt ist A4 hoch: **Seite 1 links, Seite 2 rechts**. Jede Seite
-hat 12 große Zeilen, also Platz für die meisten Maschinen. Jede Zeile enthält Werkzeug,
-Bezeichnung und ein breites Feld **Bemerkung** zum Eintragen am PC oder mit dem Stift.
+**Korrekturblatt-PDF**. **Seite 1 steht links, Seite 2 rechts.** Pro Seite gibt es 12 Zeilen mit
+den Spalten **T · Funktion · Werkzeug · Bemerkung**.
 
-![Korrekturblatt (Beispiel)](docs/korrekturblatt.png)
+**Hochkant oder quer:** Im Reiter oben rechts „Blatt: Hochkant / Quer“ wählen. Hochkant
+gibt höhere Zeilen, quer breitere Spalten (mehr Platz für Bemerkungen). Die Wahl wird
+gemerkt.
 
-- Gleiches Werkzeug auf einer Seite steht nur einmal, z. B. „T2 SCHLICHTEN DCMT04 /
-  GEWINDE M22X1.5“. Korrigiert wird ja pro Werkzeug. Das gilt auch, wenn z. B. T12
-  sowohl in KANAL1 als auch in ABSTECH aufgerufen wird.
+| Hochkant | Quer |
+|---|---|
+| ![Korrekturblatt hochkant](docs/korrekturblatt.png) | ![Korrekturblatt quer](docs/korrekturblatt_quer.png) |
+
+**Funktion und Werkzeug** werden automatisch aus dem Kommentar über dem Werkzeug getrennt:
+
+| Kommentar im Programm | Funktion | Werkzeug |
+|---|---|---|
+| `;VORDREHEN VNMG08` | VORDREHEN | VNMG08 |
+| `;BOHREN 12` | BOHREN | Ø12 (Zahl = Durchmesser) |
+| `;INNEN ECOCUT 10` | INNEN | ECOCUT Ø10 |
+| `;GEWINDE M22X1.5` | GEWINDE | M22X1.5 |
+| `;FRAESER 20` | FRAESEN | FRAESER Ø20 |
+
+Erkannt werden Wendeplatten (DCMT…, VNMG…, CCMT…), Zahlen als Durchmesser, Gewinde (M…),
+Radien (R0.8) und Werkzeugarten (Bohrer, Fräser, EcoCut …). Ist die Trennung einmal falsch,
+lässt sie sich per Antippen der Zeile von Hand ändern.
+
+- **Abstechwerkzeug und Anschlag** stehen automatisch auf **Seite 1** (hinten) und heißen
+  nach ihrer Funktion **ABSTECHEN** bzw. **ANSCHLAG**. Programmnamen wie UEBERGABE oder
+  STANGENWECHSEL gehören nicht in die Bezeichnung.
+- Gleiches Werkzeug auf einer Seite steht nur einmal, auch wenn es mehrfach aufgerufen
+  wird (z. B. T12 in KANAL1 und in ABSTECH).
 - **Seite 1 und Seite 2 werden nie zusammengefasst:** Bei zwei Kanälen hat jede Seite
   ihren eigenen Revolver, T2 auf Seite 1 ist also ein anderes Werkzeug als T2 auf Seite 2.
-- **Abstechwerkzeug und Anschlag** (Werkzeuge aus ABSTECH, ANSCHLAGEN …) stehen
-  automatisch auf **Seite 1**, hinter den Werkzeugen von Seite 1.
-- **Zeile antippen:** Dort lässt sich die **Seite wechseln** (z. B. Anschlag auf Seite 2),
-  die Bezeichnung ändern oder eine Bemerkung eintragen. Das wird gespeichert und beim nächsten
-  Mal wieder so angezeigt.
-- Hat eine Seite mehr als 12 Werkzeuge, werden die Zeilen etwas enger.
+- **Zeile antippen:** Dort lassen sich **Seite** (z. B. Anschlag auf Seite 2), **Funktion**,
+  **Werkzeug** und **Bemerkung** ändern. Das wird gespeichert.
 
 Die Datei heißt z. B. `METLOG_300069_Korrekturblatt.pdf` und liegt neben dem Programm.
 

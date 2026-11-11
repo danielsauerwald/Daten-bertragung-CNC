@@ -28,7 +28,8 @@ def test_metlog_tools_per_side_like_the_paper_sheet():
     assert [(t.tool, t.description) for t in g[2]] == [
         ("T2", "SCHLICHTEN DCMT04"), ("T2", "GEWINDE M22X1.5"), ("T3", "INNEN ECOCUT 10"), ("T3", "FRAESEN")]
     # Werkzeuge aus anderen Unterprogrammen extra, ohne Kommentar mit Programmname
-    assert [(t.tool, t.description) for t in g[0]] == [("T12", "ABSTECH / UEBERGABE"), ("T11", "ANSCHLAGEN")]
+    # Funktion statt Programmnamen: T12 = ABSTECHEN (nicht "ABSTECH / UEBERGABE"), T11 = ANSCHLAG
+    assert [(t.tool, t.description) for t in g[0]] == [("T12", "ABSTECHEN"), ("T11", "ANSCHLAG")]
 
 
 def test_fanuc_single_program_and_side_marker():
@@ -118,7 +119,7 @@ def test_korrektur_rows_parting_and_stop_on_side_one():
     assert [(r.tool, r.name) for r in rows[1]] == [
         ("T1", "VORDREHEN VNMG08"), ("T2", "FERTIGDREHEN VCMT04"), ("T3", "BOHREN 12"),
         ("T8", "INNEN ECOCUT 10"), ("T10", "GEWINDEBOHREN M14LH"),
-        ("T11", "ANSCHLAGEN"), ("T12", "ABSTECH / UEBERGABE")]
+        ("T11", "ANSCHLAG"), ("T12", "ABSTECHEN")]
     # gleiches Werkzeug auf einer Seite nur einmal (korrigiert wird pro Werkzeug)
     assert [(r.tool, r.name) for r in rows[2]] == [
         ("T2", "SCHLICHTEN DCMT04 / GEWINDE M22X1.5"), ("T3", "INNEN ECOCUT 10 / FRAESEN")]
@@ -176,8 +177,8 @@ BOESE_300240 = ("%_N_KANAL1_MPF\nT12D1 G96\nG00 X200\n;FERTIGDREHEN DCMT08\nT02D
 def test_same_tool_on_one_side_is_one_row():
     rows = korrektur_rows(extract_tools(BOESE_300240), SheetData())
     assert [(r.tool, r.name) for r in rows[1]] == [
-        ("T2 D2", "FERTIGDREHEN DCMT08"), ("T8", "BOHREN 16"), ("T11", "ANSCHLAGEN"),
-        ("T12", "ABSTECH / UEBERGABE")]
+        ("T2 D2", "FERTIGDREHEN DCMT08"), ("T8", "BOHREN 16"), ("T11", "ANSCHLAG"),
+        ("T12", "ABSTECHEN")]
     t12 = rows[1][-1]
     assert set(t12.keys) == {"1|T12", "0|T12"}
     # T2 auf Seite 2 ist ein anderes Werkzeug (zweiter Revolver) -> bleibt getrennt
@@ -187,7 +188,7 @@ def test_same_tool_on_one_side_is_one_row():
 def test_tool_without_comment_borrows_name_on_same_side_only():
     tools = extract_tools(BOESE_300240)
     k1_t12 = [t for t in tools if t.side == 1 and t.tool == "T12"][0]
-    assert k1_t12.description == "ABSTECH / UEBERGABE"  # von den Abstech-Programmen (Hauptspindel)
+    assert k1_t12.description == "ABSTECHEN"  # von den Abstech-Programmen (Hauptspindel)
     text = "%_N_KANAL1_MPF\n;SCHRUPPEN\nT02D1\nM17\n%_N_KANAL2_MPF\nT02D1\nM17\n"
     assert [(t.side, t.description) for t in extract_tools(text)] == [(1, "SCHRUPPEN"), (2, "")]
 
@@ -199,3 +200,56 @@ def test_moving_merged_row_moves_all_parts():
     rows = korrektur_rows(extract_tools(BOESE_300240), d)
     assert "T12" not in [r.tool for r in rows[1]]
     assert [r.tool for r in rows[2]].count("T12") == 1
+
+
+@pytest.mark.parametrize("desc,func,tool", [
+    ("VORDREHEN VNMG08", "VORDREHEN", "VNMG08"),
+    ("BOHREN 12", "BOHREN", "Ø12"),
+    ("INNEN ECOCUT 10", "INNEN", "ECOCUT Ø10"),
+    ("GEWINDEBOHREN M14LH", "GEWINDEBOHREN", "M14LH"),
+    ("GEWINDE M22X1.5", "GEWINDE", "M22X1.5"),
+    ("SCHLICHTEN DCMT04 / GEWINDE M22X1.5", "SCHLICHTEN / GEWINDE", "DCMT04 / M22X1.5"),
+    ("FRAESER 20", "FRAESEN", "FRAESER Ø20"),
+    ("FRAESEN 5MM", "FRAESEN", "Ø5"),
+    ("BOHREN WENDEPLATTENBOHRER 16", "BOHREN", "WENDEPLATTENBOHRER Ø16"),
+    ("SCHRUPPEN R0.8", "SCHRUPPEN", "R0.8"),        # SCHRUPPEN ist keine Wendeplatte
+    ("DCMT11T304 SCHLICHTEN", "SCHLICHTEN", "DCMT11T304"),
+    ("FASE INNEN", "FASE INNEN", ""),
+    ("ABSTECHEN", "ABSTECHEN", ""),
+])
+def test_split_function_and_tool(desc, func, tool):
+    from cnc_dnc.setupsheet import split_description
+
+    assert split_description(desc) == (func, tool)
+
+
+def test_function_from_program_names():
+    from cnc_dnc.setupsheet import function_from_program
+
+    assert function_from_program("ABSTECH") == "ABSTECHEN"
+    assert function_from_program("ANSCHLAGEN") == "ANSCHLAG"
+    assert function_from_program("UEBERGABE") == ""        # keine Werkzeugfunktion
+    assert function_from_program("STANGENWECHSEL") == ""
+
+
+def test_korrektur_rows_have_function_and_tool_and_overrides():
+    tools = extract_tools(load_program_file(METLOG))
+    d = SheetData()
+    rows = korrektur_rows(tools, d)
+    t1 = rows[1][0]
+    assert (t1.tool, t1.function, t1.tooltext) == ("T1", "VORDREHEN", "VNMG08")
+    d.korrektur[t1.key] = {"function": "SCHRUPPEN", "tool": "VNMG 080408"}
+    t1 = korrektur_rows(tools, d)[1][0]
+    assert (t1.function, t1.tooltext) == ("SCHRUPPEN", "VNMG 080408")
+
+
+def test_correction_sheet_landscape(tmp_path):
+    tools = extract_tools(load_program_file(METLOG))
+    path = str(tmp_path / "quer.pdf")
+    render_correction_sheet(path, SheetContext("METLOG_300069"), korrektur_rows(tools, SheetData()), SheetData(),
+                            landscape=True)
+    data = open(path, "rb").read()
+    assert b"/MediaBox [0 0 841.89 595.28]" in data and data.count(b"/Type /Page ") == 1
+    content = _pdf_streams(data)
+    for needle in (b"(Funktion)", b"(Werkzeug)", b"(VNMG08)", b"(\xd812)", b"(ABSTECHEN)"):
+        assert needle in content, needle

@@ -1159,8 +1159,12 @@ class App:
         name = analyze_program(text).name or os.path.splitext(os.path.basename(path))[0]
         ctx = SheetContext(program=name, machine=self.machine.display_name, customer=customer,
                            file_name=os.path.basename(path))
-        res = SetupSheetDialog(self.root, self.fonts, ctx, path, extract_tools(text), extract_parameters(text),
-                               load_sheet(path)).show()
+        dlg = SetupSheetDialog(self.root, self.fonts, ctx, path, extract_tools(text), extract_parameters(text),
+                               load_sheet(path), landscape=self.cfg.korr_landscape)
+        res = dlg.show()
+        if dlg.landscape != self.cfg.korr_landscape:  # Wahl hochkant/quer merken
+            self.cfg.korr_landscape = dlg.landscape
+            self._save_config()
         if res:
             self.refresh_files(rescan=True)
             if res == "saved":
