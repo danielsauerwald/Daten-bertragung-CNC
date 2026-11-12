@@ -102,6 +102,26 @@ class Fraesung:
     entgraten: bool = False
     wz_entgraten: int = 0
     fase: float = 0.3
+    strategie: str = ""  # leer = Vorgabe der Art, siehe STRATEGIEN
+
+
+# Frässtrategien je Art (erster Eintrag = Vorgabe)
+STRATEGIEN: Dict[str, Dict[str, str]] = {
+    "flaeche": {"zickzack": "Zickzack (hin und her)", "gleichlauf": "nur Gleichlauf", "gegenlauf": "nur Gegenlauf"},
+    "nut": {"bahnen": "Bahnen, senkrecht eintauchen", "rampe": "Bahnen, schräg eintauchen (Rampe)",
+            "trochoidal": "trochoidal (Wirbelfräsen)"},
+    "bohrung_radial": {"entspanen": "Entspanen (ganz raus)", "spanbruch": "Spanbruch (kurz zurück)",
+                       "einzug": "in einem Zug"},
+    "bohrung_axial": {"entspanen": "Entspanen (ganz raus)", "spanbruch": "Spanbruch (kurz zurück)",
+                      "einzug": "in einem Zug"},
+}
+RAMPENWINKEL = 3.0  # Grad
+TROCHOID_MIN = 1.25  # Nutbreite mindestens 1,25 × Fräser-Ø
+
+
+def strategie(fr: "Fraesung") -> str:
+    opts = STRATEGIEN.get(fr.art, {})
+    return fr.strategie if fr.strategie in opts else (next(iter(opts)) if opts else "")
 
 
 @dataclass
@@ -642,6 +662,7 @@ class Ergebnis:
     warnings: List[str] = field(default_factory=list)
     moves: List[Move] = field(default_factory=list)  # Drehbearbeitung, für die Vorschau
     arbeitsgaenge: List[str] = field(default_factory=list)
+    fraes_ops: List["FraesOp"] = field(default_factory=list)  # Fräsen/Bohren, für die Simulation
 
     @property
     def ok(self) -> bool:
@@ -778,10 +799,35 @@ def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class FMove:
+    """Fräsbewegung (für die Simulation); None = Achse bleibt. x als Durchmesser wie im Programm."""
+
+    kind: str  # "G0" | "G1"
+    x: Optional[float] = None
+    y: Optional[float] = None
+    z: Optional[float] = None
+
+
+@dataclass
+class FraesOp:
+    """Ein Fräs-/Bohr-Arbeitsgang: dieselben Bewegungen je Winkellage."""
+
+    nr: int  # Nummer der Fräsung (1-basiert)
+    t: int
+    lage: str  # "radial" | "axial"
+    winkel: List[float]
+    moves: List[FMove]
+    zeilen: List[int]  # erste Programmzeile der Bewegungen je Winkel
+    entgraten: bool = False
+    titel: str = ""
+
+
 class _MillOut:
     def __init__(self, pp: Postprozessor) -> None:
         self.pp = pp
         self.lines: List[str] = []
+        self.moves: List[FMove] = []
 
     def g(self, code: str, x: Optional[float] = None, y: Optional[float] = None, z: Optional[float] = None,
           f: Optional[float] = None) -> None:
@@ -793,6 +839,7 @@ class _MillOut:
         if f is not None:
             words.append("F" + self.pp.num(f))
         self.lines.append(" ".join(words))
+        self.moves.append(FMove("G0" if code == "G00" else "G1", x, y, z))
 
 
 def _lin(a: float, b: float, n: int) -> List[float]:
@@ -879,7 +926,7 @@ def _nut_umriss(fr: Fraesung, rp: float, rt: float, z_front: float, run_out: boo
 
 
 def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeug, res: Ergebnis,
-                  deburr: bool, pp: Postprozessor) -> Optional[Tuple[str, str, List[str], str]]:
+                  deburr: bool, pp: Postprozessor) -> Optional[Tuple[str, str, List[str], str, List[FMove]]]:
     """Bewegungen je Winkellage. Ergebnis: (Titel, Werkzeuglage radial/axial, Bewegungen, Rückzugsachse)."""
     R_s = teil.rohteil_d / 2.0
     s = max(0.5, teil.sicherheit)
@@ -917,7 +964,7 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                     res.errors.append(_cone_msg(label, w))
                     return None
                 _edge_path(m, pts, c, x_app, w.f)
-                return title, "radial", m.lines, "x"
+                return title, "radial", m.lines, "x", m.moves
             zc_min = z_lo + rad
             zc_max = max(zc_min, z_front + 1 - rad) if run_out else z_hi - rad
             if zc_max < zc_min - TOL:
@@ -927,6 +974,19 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
             nz = int(math.ceil((zc_max - zc_min) / (0.7 * w.dm) - 1e-9)) + 1 if zc_max - zc_min > TOL else 1
             zcs = _lin(zc_max, zc_min, nz)
             y_out = math.sqrt(max(0.0, rp_all * rp_all - h * h)) + rad + 1
+            strat = strategie(fr)
+            if strat in ("gleichlauf", "gegenlauf"):
+                # immer in eine Richtung schneiden, zurück über dem Teil. Bezogen auf rechtsdrehendes
+                # Werkzeug (M3): Material liegt bei -Z (Bahnen von rechts nach links) -> Gleichlauf = -Y
+                d = -1.0 if strat == "gleichlauf" else 1.0
+                for hi in _steps(rp, h, w.ap):
+                    for zc in zcs:
+                        m.g("G00", x=x_app)
+                        m.g("G00", z=zc, y=-d * y_out)
+                        m.g("G01", x=2 * hi, f=w.f)
+                        m.g("G01", y=d * y_out)
+                m.g("G00", x=x_app)
+                return title, "radial", m.lines, "x", m.moves
             m.g("G00", z=zcs[0], y=-y_out)
             m.g("G00", x=x_app)
             side = -1
@@ -939,7 +999,7 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                     side = -side
                     m.g("G01", y=side * y_out)
             m.g("G00", x=x_app)
-            return title, "radial", m.lines, "x"
+            return title, "radial", m.lines, "x", m.moves
 
         # Nut
         b, t = fr.mass, fr.tiefe
@@ -958,7 +1018,7 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                 res.errors.append(_cone_msg(label, w))
                 return None
             _edge_path(m, pts, c, x_app, w.f)
-            return "ENTGRATEN NUT {}X{}".format(fmt(b), fmt(t)), "radial", m.lines, "x"
+            return "ENTGRATEN NUT {}X{}".format(fmt(b), fmt(t)), "radial", m.lines, "x", m.moves
         if w.dm > b + TOL:
             res.errors.append("{}: Fräser Ø{} ist breiter als die Nut ({}).".format(label, fmt(w.dm), fmt(b)))
             return None
@@ -974,20 +1034,57 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
             ys = _lin(-(b - w.dm) / 2, (b - w.dm) / 2, int(math.ceil((b - w.dm) / (0.75 * w.dm) - 1e-9)) + 1)
         rb = rp - t
         f_plunge = max(1.0, round(w.f * 0.3))
+        strat = strategie(fr)
+        if strat == "trochoidal":
+            if b < TROCHOID_MIN * w.dm - TOL:
+                res.errors.append("{}: Für trochoidales Fräsen muss die Nut mindestens {:g} × so breit sein wie der "
+                                  "Fräser (Ø{} -> ab {}).".format(label, TROCHOID_MIN, fmt(w.dm),
+                                                                 fmt(TROCHOID_MIN * w.dm)))
+                return None
+            _trochoid(m, rp, rb, (b - w.dm) / 2, zc_min, zc_max, w, x_app, f_plunge)
+            return title, "radial", m.lines, "x", m.moves
         m.g("G00", z=zc_max, y=ys[0])
         m.g("G00", x=x_app)
         at_start = True
         order = ys
+        ramp = strat == "rampe" and zc_max - zc_min > TOL and not run_out
+        if strat == "rampe" and not ramp and not run_out:
+            res.warnings.append("{}: Nut so lang wie der Fräser – Rampe nicht möglich, es wird senkrecht "
+                                "eingetaucht.".format(label))
+        cur_x = rp + s
         for i, ri in enumerate(_steps(rp, rb, w.ap)):
-            m.g("G01", x=2 * ri, f=f_plunge)
+            if ramp:  # schräg eintauchen: hin und her entlang der Nutmitte
+                top = min(cur_x, rp + 0.5)
+                if abs(top - cur_x) > TOL:
+                    m.g("G01", x=2 * top, f=f_plunge)
+                per_stroke = (zc_max - zc_min) * math.tan(math.radians(RAMPENWINKEL))
+                strokes = max(1, int(math.ceil((top - ri) / per_stroke - 1e-9)))
+                zpos = zc_max if at_start else zc_min
+                for k in range(1, strokes + 1):
+                    zpos = zc_min if zpos == zc_max else zc_max
+                    m.g("G01", x=2 * (top - (top - ri) * k / strokes), z=zpos, f=w.f if k == 1 else None)
+                if (zpos == zc_max) != at_start:
+                    at_start = not at_start
+                    m.g("G01", z=zc_max if at_start else zc_min)
+            else:
+                m.g("G01", x=2 * ri, f=f_plunge)
+            cur_x = ri
             for k, y in enumerate(order):
                 if k:
                     m.g("G01", y=y)
                 m.g("G01", z=zc_min if at_start else zc_max, f=w.f if k == 0 else None)
                 at_start = not at_start
+            if len(ys) > 1 and zc_max - zc_min > TOL:
+                # mehrere Bahnen: einmal um die Mittelpunktsbahn herum, sonst bleiben an den
+                # Nutenden Rundungen zwischen den Bahnen stehen (Ende wieder an derselben Ecke)
+                y_end, z_end = order[-1], (zc_max if at_start else zc_min)
+                m.g("G01", y=order[0])
+                m.g("G01", z=zc_min if z_end == zc_max else zc_max)
+                m.g("G01", y=y_end)
+                m.g("G01", z=z_end)
             order = list(reversed(order))
         m.g("G00", x=x_app)
-        return title, "radial", m.lines, "x"
+        return title, "radial", m.lines, "x", m.moves
 
     if fr.art == "bohrung_radial":
         d, t, zb = fr.mass, fr.tiefe, fr.z1
@@ -1016,11 +1113,12 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                 return None
             m.g("G01", x=2 * (rp - d / 2 - c), f=w.f)
             m.g("G00", x=x_app)
-            return "ENTGRATEN BOHRUNG D{}".format(fmt(d)), "radial", m.lines, "x"
+            return "ENTGRATEN BOHRUNG D{}".format(fmt(d)), "radial", m.lines, "x", m.moves
         if w.dm > 0 and abs(w.dm - d) > TOL:
             res.warnings.append("{}: Bohrer T{} hat Ø{}, die Bohrung Ø{}.".format(label, w.t, fmt(w.dm), fmt(d)))
-        _peck(m, "x", x_app, [2 * v for v in _steps(rp, rp - t, w.ap if w.ap > TOL else t)], 1.0, w.f)
-        return "BOHREN D{} RADIAL".format(fmt(d)), "radial", m.lines, "x"
+        _peck(m, "x", x_app, [2 * v for v in _steps(rp, rp - t, w.ap if w.ap > TOL else t)], 1.0, w.f,
+              strategie(fr))
+        return "BOHREN D{} RADIAL".format(fmt(d)), "radial", m.lines, "x", m.moves
 
     if fr.art == "bohrung_axial":
         d, t, zf, lk = fr.mass, fr.tiefe, fr.z1, fr.teilkreis
@@ -1054,11 +1152,11 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                 return None
             m.g("G01", z=zf - d / 2 - c, f=w.f)
             m.g("G00", z=zf + s)
-            return "ENTGRATEN STIRNBOHRUNG D{}".format(fmt(d)), "axial", m.lines, "z"
+            return "ENTGRATEN STIRNBOHRUNG D{}".format(fmt(d)), "axial", m.lines, "z", m.moves
         if w.dm > 0 and abs(w.dm - d) > TOL:
             res.warnings.append("{}: Bohrer T{} hat Ø{}, die Bohrung Ø{}.".format(label, w.t, fmt(w.dm), fmt(d)))
-        _peck(m, "z", zf + s, _steps(zf, zf - t, w.ap if w.ap > TOL else t), 0.5, w.f)
-        return "BOHREN D{} STIRN".format(fmt(d)), "axial", m.lines, "z"
+        _peck(m, "z", zf + s, _steps(zf, zf - t, w.ap if w.ap > TOL else t), 0.5, w.f, strategie(fr))
+        return "BOHREN D{} STIRN".format(fmt(d)), "axial", m.lines, "z", m.moves
 
     res.errors.append("{}: unbekannte Art „{}“.".format(label, fr.art))
     return None
@@ -1104,17 +1202,51 @@ def _edge_path(m: _MillOut, pts: List[Tuple[float, float, float]], c: float, x_a
     m.g("G00", x=x_app)
 
 
-def _peck(m: _MillOut, axis: str, safe: float, depths: List[float], back: float, f: float) -> None:
-    """Tieflochbohren mit Spanbruch: nach jedem Schritt ganz raus, dann knapp über die letzte Tiefe."""
+def _peck(m: _MillOut, axis: str, safe: float, depths: List[float], back: float, f: float,
+          art: str = "entspanen") -> None:
+    """Bohren: „entspanen“ = nach jedem Schritt ganz raus, „spanbruch“ = kurz zurück, „einzug“ = am Stück."""
     key = axis.lower()
+    if art == "einzug":
+        depths = depths[-1:]
     prev = None
     for i, dv in enumerate(depths):
         if i:
-            m.g("G00", **{key: safe})
-            m.g("G00", **{key: prev + back})
+            if art == "spanbruch":
+                m.g("G00", **{key: prev + back})
+            else:
+                m.g("G00", **{key: safe})
+                m.g("G00", **{key: prev + back})
         m.g("G01", **{key: dv}, f=f if i == 0 else None)
         prev = dv
     m.g("G00", **{key: safe})
+
+
+def _trochoid(m: _MillOut, rp: float, rb: float, rl: float, zc_min: float, zc_max: float, w: Werkzeug,
+              x_app: float, f_plunge: float) -> None:
+    """Trochoidal: Fräsermitte läuft Kreise (Radius rl) und rückt dabei entlang der Nut vor;
+    am Ende eine Runde an den Wänden entlang. Kreise als kurze Geraden (sicher in jeder Ebene)."""
+    step = max(0.05 * w.dm, min(0.2 * w.dm, rl))
+    rz = min(rl, max(0.0, zc_max - zc_min) / 2)  # kurze Nut: Schleifen in Längsrichtung flacher (Ellipse)
+    c_hi, c_lo = zc_max - rz, zc_min + rz
+    m.g("G00", z=c_hi + rz, y=0)
+    m.g("G00", x=x_app)
+    for ri in _steps(rp, rb, w.ap):
+        m.g("G01", x=2 * ri, f=f_plunge)
+        length = c_hi - c_lo
+        loops = max(1, int(math.ceil(length / step - 1e-9))) if length > TOL else 1
+        n = 24
+        for k in range(loops * n + 1):
+            th = 2 * math.pi * k / n
+            c = c_hi - length * min(1.0, k / (loops * n)) if length > TOL else c_hi
+            m.g("G01", y=rl * math.sin(th), z=c + rz * math.cos(th), f=w.f if k == 0 else None)
+        # einmal ganz herum: die Fräsermitte fährt das Rechteck [-rl, rl] x [zc_min, zc_max] ab,
+        # damit Wände und Ecken sauber werden; Ende am Anfang der nächsten Ebene
+        m.g("G01", y=rl, z=zc_max)
+        m.g("G01", z=zc_min)
+        m.g("G01", y=-rl)
+        m.g("G01", z=zc_max)
+        m.g("G01", y=0)
+    m.g("G00", x=x_app)
 
 
 def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
@@ -1145,7 +1277,7 @@ def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
         body = _feature_body(teil, geom, nr, fr, w, res, deburr, pp)
         if body is None:
             continue
-        title, lage, lines, axis = body
+        title, lage, lines, axis, body_moves = body
         winkel = "/".join(fmt(a) for a in fr.winkel)
         add = out.lines.extend
         out.raw("")
@@ -1154,6 +1286,7 @@ def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
         add(pp.tool_lines(w.t, w.d, pp.vorschub_min, pp.ebene_radial if lage == "radial" else pp.ebene_axial))
         add(pp.fill(pp.spindel_aus))
         add(pp.fill(pp.c_ein))
+        starts: List[int] = []
         for i, a in enumerate(fr.winkel):
             if i:
                 add(pp.fill(pp.loesen))
@@ -1161,7 +1294,9 @@ def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
             add(pp.fill(pp.klemmen))
             if i == 0:
                 add(pp.fill(pp.awz_ein, S=w.s))
+            starts.append(len(out.lines))
             add(lines)
+        res.fraes_ops.append(FraesOp(nr, w.t, lage, list(fr.winkel), list(body_moves), starts, deburr, title))
         add(pp.fill(pp.loesen))
         out.raw("G00 Y" + pp.num(0))
         add(pp.fill(pp.awz_aus))
@@ -1243,6 +1378,8 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
     body = list(out.lines)
     for mv in out.moves:
         mv.line += len(head)
+    for op in res.fraes_ops:
+        op.zeilen = [z + len(head) for z in op.zeilen]
     tail = [""] + pp.fill(pp.ende) if rahmen else []
     res.code = "\n".join(head + body + tail) + "\n"
     res.moves = out.moves

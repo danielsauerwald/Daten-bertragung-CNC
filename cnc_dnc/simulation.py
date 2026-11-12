@@ -32,7 +32,7 @@ TOL_R = 0.012  # Toleranz für „Kontur verletzt“ / „ins Material“ in mm
 
 @dataclass
 class Ereignis:
-    art: str  # "eilgang" | "kontur" | "halter" | "rest" | "radius" | "hinweis"
+    art: str  # "eilgang" | "kontur" | "halter" | "rest" | "ueberschnitt" | "radius" | "hinweis"
     text: str
     z: float = 0.0
     r: float = 0.0
@@ -42,7 +42,7 @@ class Ereignis:
 
     @property
     def schwer(self) -> bool:
-        return self.art in ("eilgang", "kontur", "halter", "rest")
+        return self.art in ("eilgang", "kontur", "halter", "rest", "ueberschnitt")
 
 
 @dataclass

@@ -15,6 +15,7 @@ from .kontur import (
     FEATURE_LAGE,
     FEATURES,
     SEG_OPS,
+    STRATEGIEN,
     Ergebnis,
     Fraesung,
     Geometrie,
@@ -32,6 +33,7 @@ from .kontur import (
     parse_num,
     parse_winkel,
     polyline,
+    strategie,
     winkel_text,
 )
 from .postpro import ARTEN, Postprozessor, fuer_maschine
@@ -156,6 +158,9 @@ class FeatureDialog(Dialog):
         choices = _tool_choices(teil, arten, lage)
         cur = teil.tool(fr.wz)
         self._combo("wz", "Werkzeug", cur.label if cur else (choices[0] if choices else ""), choices)
+        strat = STRATEGIEN.get(art, {})
+        if strat:
+            self._combo("strategie", "Strategie", strat[strategie(fr)], list(strat.values()))
         self.deburr = tk.BooleanVar(master=self, value=fr.entgraten)
         ttk.Checkbutton(body, text="Kanten entgraten (Fasenfräser 90°)", variable=self.deburr,
                         style="Surface.TCheckbutton", command=self._toggle).grid(
@@ -247,6 +252,8 @@ class FeatureDialog(Dialog):
             self.msg.configure(text="Bitte ein Werkzeug wählen (Liste im Reiter „Werkzeuge“).")
             return
         fr.wz = wz
+        if "strategie" in self.vars:
+            fr.strategie = _inv(STRATEGIEN[fr.art]).get(self.vars["strategie"].get(), "")
         fr.entgraten = bool(self.deburr.get())
         if fr.entgraten:
             wd = _tool_from_choice(self.vars["wz_entgraten"].get())
@@ -760,8 +767,8 @@ class KonturDialog(Dialog):
             self.refresh()
         if self.res.errors:
             return
-        if not self.res.moves:
-            dialogs.info(self, self.fonts, "Nichts zu simulieren", "Das Programm enthält keine Drehbearbeitung.")
+        if not self.res.moves and not self.res.fraes_ops:
+            dialogs.info(self, self.fonts, "Nichts zu simulieren", "Das Programm enthält keine Bearbeitung.")
             return
         from .sim_dialog import SimulationDialog
 
@@ -1138,8 +1145,9 @@ class KonturDialog(Dialog):
             self._bar_button("Punkt ändern …", lambda: self.edit_point(i))
         else:
             fr = t.fraesungen[i]
-            self.sel_label.configure(text="Fräsung {}:  {}  ·  {}  ·  C {}°".format(
-                i + 1, FEATURES[fr.art], _feature_text(fr), winkel_text(fr.winkel).replace(" ", " / ")))
+            self.sel_label.configure(text="Fräsung {}:  {}  ·  {}  ·  C {}°  ·  {}".format(
+                i + 1, FEATURES[fr.art], _feature_text(fr), winkel_text(fr.winkel).replace(" ", " / "),
+                STRATEGIEN.get(fr.art, {}).get(strategie(fr), "")))
             self._bar_button("Ändern …", lambda: self.edit_feature(i))
             self._bar_button("Entgraten", lambda: self.toggle_deburr(i), fr.entgraten)
             self._bar_button("Löschen", lambda: self.delete_feature(i))

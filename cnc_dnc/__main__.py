@@ -125,6 +125,11 @@ def main(argv=None) -> int:
         dsim = DrehSimulation(beispiel_teil(), generate(beispiel_teil(), rahmen=True))
         dsim.bis_ende()
         assert dsim.fertig and not [e for e in dsim.ereignisse if e.schwer]
+        from .fraessim import FraesSimulation
+
+        fsim = FraesSimulation(beispiel_teil(), generate(beispiel_teil(), rahmen=True))
+        fsim.bis_ende()
+        assert fsim.fertig and not [e for e in fsim.ereignisse if e.schwer]
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)

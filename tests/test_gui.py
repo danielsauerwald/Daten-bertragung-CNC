@@ -946,3 +946,39 @@ def test_simulation_dialog_plays_and_jumps_to_problems(app, monkeypatch):
     k.simulation()
     assert opened and opened[0].schritte
     k.destroy()
+
+
+def test_simulation_dialog_milling_phase_and_strategy_choice(app):
+    from cnc_dnc.kontur import Fraesung, beispiel_teil, generate, gleich_verteilt
+    from cnc_dnc.kontur_dialog import FeatureDialog
+    from cnc_dnc.sim_dialog import SimulationDialog
+
+    t = beispiel_teil()
+    # Strategie im Fräsungs-Fenster wählen
+    fd = FeatureDialog(app.root, app.fonts, t, Fraesung("nut", [90], -16, -28, 12, 2, 0, 5), "Nut")
+    assert "strategie" in fd.vars and fd.vars["strategie"].get().startswith("Bahnen")
+    fd.vars["strategie"].set("trochoidal (Wirbelfräsen)")
+    fd.ok()
+    assert fd.result.strategie == "trochoidal"
+    t.fraesungen = [Fraesung("flaeche", gleich_verteilt(6), 0, -10, 17, 0, 0, 5), fd.result,
+                    Fraesung("bohrung_axial", [45, 225], 0, 0, 4, 6, 12, 8)]
+    res = generate(t, rahmen=True)
+    assert res.ok, res.errors
+    dlg = SimulationDialog(app.root, app.fonts, t, res, titel="TEST")
+    dlg.geometry("1340x680+0+0")
+    dlg.deiconify()
+    dlg.update()
+    assert dlg.ab.phase == "dreh"
+    dlg.zum_fraesen()
+    dlg.update()
+    assert dlg.ab.phase == "fraes" and dlg._modus == "fraes"
+    assert "FRAESER D8" in dlg.wz_info.cget("text") and "Zickzack" in dlg.wz_info.cget("text")
+    dlg.schritt(60)
+    assert len(dlg.cv.coords(dlg.f_schnitt)) > 20 and dlg._bild is not None
+    dlg.ende()
+    assert dlg.ab.fertig and dlg.summary.cget("text").startswith("✓")
+    assert len(dlg.fs.bohrungen) == 2
+    # zurück zum Drehen: Ansicht schaltet um
+    dlg.gehe_zu(5)
+    assert dlg.ab.phase == "dreh" and dlg._modus == "dreh"
+    dlg.destroy()
