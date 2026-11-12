@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.10
+# CNC-Datenübertragung 2.11
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -44,6 +44,9 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
 - **Kontur → Code**: Teil mit Maßen eingeben, in der Zeichnung antippen, ob gedreht, gefräst
   oder entgratet wird – auch Flächen, Nuten und Bohrungen auf Winkellagen (C-/Y-Achse).
   Heraus kommt ein fertiges Programm, siehe [Kontur → Code](#kontur--code).
+- **Fenster passen auf jeden Windows-Bildschirm**: Kontur-Assistent und Dialoge richten sich nach
+  dem freien Bereich über der Taskleiste (auch bei 125 %/150 % Skalierung); die Tasten unten
+  bleiben immer sichtbar.
 - **Postprozessor pro Maschine**: G- und M-Befehle je Maschine einstellbar, z. B. angetriebenes
   Werkzeug `S3=/M3=` oder `S4=/M4=` bei Siemens, C-Achse bei Fanuc, siehe
   [Postprozessor](#postprozessor-pro-maschine).
@@ -298,11 +301,16 @@ aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
 
 ### So geht's
 
-1. **Reiter „Kontur“**: Rohteil-Ø und Planaufmaß eintragen. Die Kontur wird von der Stirnseite
-   (Nullpunkt X0 Z0 in der Mitte) nach links eingegeben:
+1. **Reiter „Kontur“**: Rohteil-Ø, Planaufmaß und **Rohteil-Länge** (inkl. Planaufmaß, `0` = Stange)
+   eintragen. Die Kontur wird von der Stirnseite (Nullpunkt X0 Z0 in der Mitte) nach links eingegeben:
    - **+ Absatz …**: Durchmesser und Länge, z. B. Ø20 × 15, dann Ø26 × 15. Die Punkte setzt das
      Programm selbst.
    - **+ Punkt …**: einzelner Punkt mit X (Ø) und Z, z. B. für einen Kegel.
+
+   Die Zeichnung ist bemaßt: Durchmesser an den Absätzen, darunter die **Längen** der
+   Konturabschnitte, die **Gesamtlänge** der Kontur und die **Rohteil-Länge**. Die Punktliste zeigt
+   die Länge jedes Abschnitts ebenfalls. Ist die Kontur länger als das Rohteil, meldet der
+   Assistent das.
 2. **In der Zeichnung antippen:**
    - **Element** (Linie): **Drehen** oder **Nicht drehen**. Unter „Fräsen hier“ legt man direkt
      eine Fläche, Nut oder Bohrung an dieser Stelle an (Z-Bereich wird übernommen).

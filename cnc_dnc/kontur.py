@@ -106,6 +106,7 @@ class Fraesung:
 class Teil:
     name: str = "TEIL"
     rohteil_d: float = 32.0
+    rohteil_l: float = 0.0  # Länge des Rohteils inkl. Planaufmaß; 0 = Stange (Länge offen)
     planaufmass: float = 0.5
     punkte: List[KPunkt] = field(default_factory=lambda: [KPunkt(0.0, 0.0)])
     fraesungen: List[Fraesung] = field(default_factory=list)
@@ -205,6 +206,27 @@ def standard_werkzeuge() -> List[Werkzeug]:
     ]
 
 
+def masse(teil: Teil) -> Dict[str, Any]:
+    """Längenmaße für die Zeichnung (Z-Werte, Länge).
+
+    ``kette``: Abschnitte zwischen den Z-Werten der Konturpunkte (Absätze haben keine Länge),
+    ``gesamt``: Konturlänge ab Stirnseite (nur bei mehr als einem Abschnitt),
+    ``rohteil``: Rohteillänge ab Rohteil-Stirnseite (Planaufmaß) – None bei Stange.
+    """
+    zs: List[float] = []
+    for p in teil.punkte:
+        if not any(abs(p.z - z) < TOL for z in zs):
+            zs.append(p.z)
+    zs.sort(reverse=True)
+    kette = [(a, b, a - b) for a, b in zip(zs, zs[1:])]
+    gesamt = (zs[0], zs[-1], zs[0] - zs[-1]) if len(kette) > 1 else None
+    rohteil = None
+    if teil.rohteil_l > TOL:
+        front = max(0.0, teil.planaufmass)
+        rohteil = (front, front - teil.rohteil_l, teil.rohteil_l)
+    return {"kette": kette, "gesamt": gesamt, "rohteil": rohteil}
+
+
 def neues_teil() -> Teil:
     return Teil(werkzeuge=standard_werkzeuge())
 
@@ -213,6 +235,7 @@ def beispiel_teil() -> Teil:
     """Kleine Welle mit zwei Schlüsselflächen und einer Querbohrung (zum Ausprobieren)."""
     t = neues_teil()
     t.name = "BEISPIEL"
+    t.rohteil_l = 45.0
     t.punkte = [
         KPunkt(0, 0),
         KPunkt(20, 0, "fase", 1.0),
@@ -1099,6 +1122,24 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
     res.warnings.extend(geom.warnings)
     if res.errors:
         return res
+    if teil.rohteil_l > TOL:
+        stock_end = max(0.0, teil.planaufmass) - teil.rohteil_l
+        z_last = min(p.z for p in teil.punkte)
+        if z_last < stock_end - TOL:
+            res.errors.append("Die Kontur ist {} lang, mit Planaufmaß {} – das Rohteil nur {}.".format(
+                fmt(-z_last), fmt(-z_last + max(0.0, teil.planaufmass)), fmt(teil.rohteil_l)))
+        for nr, fr in enumerate(teil.fraesungen, start=1):
+            if fr.art in ("flaeche", "nut"):
+                lo = min(fr.z1, fr.z2)
+            elif fr.art == "bohrung_radial":
+                lo = fr.z1 - fr.mass / 2
+            else:
+                lo = fr.z1 - fr.tiefe
+            if lo < stock_end - TOL:
+                res.errors.append("Fräsung {}: reicht bis Z{}, hinter das Rohteil (Ende Z{}).".format(
+                    nr, fmt(lo), fmt(stock_end)))
+        if res.errors:
+            return res
     if not geom.first and not teil.fraesungen:
         res.errors.append("Es ist nichts zu bearbeiten: alle Elemente stehen auf „Nicht drehen“ und es gibt "
                           "keine Fräsung.")
@@ -1126,7 +1167,9 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
     head.append(pp.comment("KONTUR-ASSISTENT TEIL {}".format(name)))
     if maschine:
         head.append(pp.comment("MASCHINE {}".format(maschine)))
-    head += [pp.comment("ROHTEIL D{} NULLPUNKT MITTE STIRNSEITE Z0".format(fmt(teil.rohteil_d))),
+    roh = "D{} L{}".format(fmt(teil.rohteil_d), fmt(teil.rohteil_l)) if teil.rohteil_l > TOL else \
+        "D{}".format(fmt(teil.rohteil_d))
+    head += [pp.comment("ROHTEIL {} NULLPUNKT MITTE STIRNSEITE Z0".format(roh)),
              pp.comment("VOR DEM ERSTEN LAUF SIMULIEREN UND PRUEFEN")]
     if rahmen:
         head += pp.fill(pp.start)

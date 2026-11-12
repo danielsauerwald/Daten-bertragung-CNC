@@ -29,6 +29,7 @@ from .kontur import (
     fmt,
     generate,
     gleich_verteilt,
+    masse,
     neues_teil,
     parse_num,
     parse_winkel,
@@ -286,9 +287,9 @@ class KonturDialog(Dialog):
         self._job: Optional[str] = None
         self._loading = False
         self.show_path = tk.BooleanVar(master=self, value=True)
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self._size = (min(sw - 24, px(self, 1360)), min(sh - 72, px(self, 740)))
-        self.minsize(min(self._size[0], px(self, 960)), min(self._size[1], px(self, 600)))
+        # Wunschgröße; show() verkleinert auf den freien Bildschirm (ohne Taskleiste und Titelleiste)
+        self._size = (px(self, 1600), px(self, 1000))
+        self.minsize(px(self, 800), px(self, 500))
 
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -304,16 +305,10 @@ class KonturDialog(Dialog):
         self.refresh()
 
     def show(self):
-        """Wie Dialog.show, aber feste Größe; unter Windows maximiert (Tablet)."""
-        w, h = self._size
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry("{}x{}+{}+{}".format(w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 2 - 20)))
+        """Wie Dialog.show, aber groß: so viel vom freien Bildschirm wie möglich (ohne Taskleiste)."""
+        w, h, x, y = self.place_on_screen(*self._size)
+        self.geometry("{}x{}+{}+{}".format(w, h, x, y))
         self.deiconify()
-        if IS_WIN:
-            try:
-                self.state("zoomed")
-            except tk.TclError:
-                pass
         try:
             self.wait_visibility()
             self.grab_set()
@@ -417,6 +412,15 @@ class KonturDialog(Dialog):
         fr.pack(fill="both", expand=True, pady=(px(self, 6), px(self, 6)))
         return tree
 
+    @staticmethod
+    def _shrink_list_first(tab: tk.Frame, tree: ttk.Treeview) -> None:
+        """Wird der Reiter zu niedrig (kleiner Bildschirm, Taskleiste), soll die Liste kürzer werden –
+        nicht die Tasten und Felder darunter. Bei pack schrumpft sonst das zuletzt gepackte Element."""
+        box = tree.master
+        kids = tab.pack_slaves()
+        for w in reversed(kids[kids.index(box) + 1:]):
+            w.pack_configure(side="bottom", before=box)
+
     def _buttons(self, parent, items) -> tk.Frame:
         fr = tk.Frame(parent, bg=C["surface"])
         fr.pack(fill="x")
@@ -433,10 +437,11 @@ class KonturDialog(Dialog):
         self._field(top, "name", "Teil", 14, conv=str)
         self._field(top, "rohteil_d", "Rohteil Ø", 6, col=2)
         self._field(top, "planaufmass", "Planaufmaß", 6, col=0, row=1)
-        tk.Label(top, text="Nullpunkt: Mitte Stirnseite (X0 Z0)", bg=C["surface"], fg=C["muted"],
-                 font=self.fonts.small).grid(row=1, column=2, columnspan=2, sticky="w", padx=(px(self, 12), 0))
-        self.pt_tree = self._tree(f, [("nr", "Nr", 36), ("x", "X (Ø)", 66), ("z", "Z", 66),
-                                      ("op", "Element bis hier", 136), ("ecke", "Ecke", 100)], height=5)
+        self._field(top, "rohteil_l", "Rohteil L", 6, col=2, row=1)
+        tk.Label(top, text="Rohteil L = Länge inkl. Planaufmaß, 0 = Stange", bg=C["surface"], fg=C["muted"],
+                 font=self.fonts.small).grid(row=2, column=0, columnspan=4, sticky="w")
+        self.pt_tree = self._tree(f, [("nr", "Nr", 34), ("x", "X (Ø)", 60), ("z", "Z", 60), ("l", "Länge", 62),
+                                      ("op", "Bearbeitung", 108), ("ecke", "Ecke", 96)], height=5)
         self.pt_tree.bind("<<TreeviewSelect>>", self._pt_selected)
         self.pt_tree.bind("<Double-1>", lambda e: self.edit_point())
         self._buttons(f, [("+ Absatz …", self.add_step), ("+ Punkt …", self.add_point),
@@ -455,7 +460,8 @@ class KonturDialog(Dialog):
         self.cb_fine.bind("<<ComboboxSelected>>", lambda e: self._turn_tools())
         self._field(turn, "aufmass_x", "Aufmaß X (Ø)", 5, col=2, row=1)
         self._field(turn, "aufmass_z", "Aufmaß Z", 5, col=2, row=2)
-        self._field(turn, "kante", "Entgraten = Fase", 5, col=0, row=3)
+        self._field(turn, "kante", "Entgraten = Fase", 5, col=2, row=0)
+        self._shrink_list_first(f, self.pt_tree)
 
     def _tab_fraesen(self) -> None:
         f = self._tab("Fräsen")
@@ -473,6 +479,7 @@ class KonturDialog(Dialog):
         tk.Frame(f, bg=C["surface"], height=px(self, 6)).pack()
         self._buttons(f, [("Ändern …", self.edit_feature), ("Entgraten ein/aus", self.toggle_deburr),
                           ("Löschen", self.delete_feature)])
+        self._shrink_list_first(f, self.ft_tree)
 
     def _tab_werkzeuge(self) -> None:
         f = self._tab("Werkzeuge")
@@ -486,6 +493,7 @@ class KonturDialog(Dialog):
                          "Schnitt, Bohren Tiefe je Spanbruch (0 = in einem Zug).  Lage: radial (quer zur Achse, "
                          "Y-Achse) oder axial (Stirnseite).", bg=C["surface"], fg=C["muted"], font=self.fonts.small,
                  wraplength=px(self, 460), justify="left", anchor="w").pack(fill="x", pady=(px(self, 8), 0))
+        self._shrink_list_first(f, self.wz_tree)
 
     def _tab_postpro(self) -> None:
         f = self._tab("Postprozessor")
@@ -688,10 +696,11 @@ class KonturDialog(Dialog):
         sel_pt = self.pt_tree.selection()
         self.pt_tree.delete(*self.pt_tree.get_children())
         for i, p in enumerate(t.punkte):
-            op = "Start" if i == 0 else SEG_OPS.get(p.op, p.op)
+            op = "Start (Mitte)" if i == 0 else SEG_OPS.get(p.op, p.op)
+            length = abs(p.z - t.punkte[i - 1].z) if i else 0.0
             self.pt_tree.insert("", "end", iid="p{}".format(i),
-                                values=(i, fmt(p.x), fmt(p.z), op, _ecke_text(p, t) if 0 < i < len(t.punkte) - 1
-                                        else ""))
+                                values=(i, fmt(p.x), fmt(p.z), fmt(length) if length > 1e-9 else "", op,
+                                        _ecke_text(p, t) if 0 < i < len(t.punkte) - 1 else ""))
         if sel_pt and self.pt_tree.exists(sel_pt[0]):
             self.pt_tree.selection_set(sel_pt[0])
         sel_ft = self.ft_tree.selection()
@@ -1137,19 +1146,48 @@ class KonturDialog(Dialog):
     # ---------------------------------------------------------------- Zeichnung
 
     def _click(self, event) -> None:
+        """Antippen: das dem Finger nächste Element. Eckpunkte sind klein und bekommen einen Bonus,
+        Fräsungen einen kleineren – so trifft man eine Ecke auf der Linie, aber eine Fräsung, in die man
+        hineintippt, auch wenn eine Ecke in der Nähe liegt."""
         r = px(self, 14)
+        bonus = {"corner": px(self, 10), "feat": px(self, 3), "seg": 0}
         items = self.cv.find_overlapping(event.x - r, event.y - r, event.x + r, event.y + r)
-        found: Dict[str, int] = {}
+        best: Optional[Tuple[float, str, int]] = None
         for item in items:
+            d = self._distance(item, event.x, event.y)
             for tag in self.cv.gettags(item):
                 for kind in ("corner", "feat", "seg"):
-                    if tag.startswith(kind) and tag[len(kind):].isdigit() and kind not in found:
-                        found[kind] = int(tag[len(kind):])
-        for kind in ("corner", "feat", "seg"):
-            if kind in found:
-                self.select(kind, found[kind])
-                return
-        self.select(None)
+                    if tag.startswith(kind) and tag[len(kind):].isdigit():
+                        score = d - bonus[kind]
+                        if best is None or score < best[0]:
+                            best = (score, kind, int(tag[len(kind):]))
+        if best is None:
+            self.select(None)
+        else:
+            self.select(best[1], best[2])
+
+    def _distance(self, item, x: float, y: float) -> float:
+        """Abstand eines Canvas-Elements zum Tippunkt (Linie: zur Strecke, sonst zur Fläche)."""
+        cv = self.cv
+        kind = cv.type(item)
+        if kind == "line":
+            c = cv.coords(item)
+            best = float("inf")
+            for i in range(0, len(c) - 3, 2):
+                ax, ay, bx, by = c[i:i + 4]
+                dx, dy = bx - ax, by - ay
+                ln = dx * dx + dy * dy
+                t = 0.0 if ln == 0 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / ln))
+                best = min(best, math.hypot(x - ax - t * dx, y - ay - t * dy))
+            return best
+        bb = cv.bbox(item)
+        if not bb:
+            return float("inf")
+        if kind == "oval":  # Eckpunkt: Abstand zur Mitte
+            return math.hypot(x - (bb[0] + bb[2]) / 2, y - (bb[1] + bb[3]) / 2)
+        dx = max(bb[0] - x, 0, x - bb[2])
+        dy = max(bb[1] - y, 0, y - bb[3])
+        return math.hypot(dx, dy)
 
     def redraw(self) -> None:
         cv = self.cv
@@ -1159,17 +1197,26 @@ class KonturDialog(Dialog):
             return
         t = self.teil
         R = max(1.0, t.rohteil_d / 2)
+        dims = masse(t)
+        stock_end = dims["rohteil"][1] if dims["rohteil"] else None
         z_last = min([p.z for p in t.punkte] + [min(f.z1, f.z2) for f in t.fraesungen if f.art in ("flaeche", "nut")]
-                     + [f.z1 for f in t.fraesungen if f.art == "bohrung_radial"])
-        z_lo = z_last - max(4.0, 0.12 * max(10.0, -z_last))
+                     + [f.z1 for f in t.fraesungen if f.art == "bohrung_radial"]
+                     + ([stock_end] if stock_end is not None else []))
+        z_lo = z_last - (max(2.0, 0.05 * max(10.0, -z_last)) if stock_end is not None and stock_end <= z_last + 1e-6
+                         else max(4.0, 0.12 * max(10.0, -z_last)))
         z_hi = max(t.planaufmass, 0) + max(3.0, 0.08 * max(10.0, -z_last))
         end_w = max(px(self, 150), min(W * 0.27, H * 0.7))
         side_w = W - end_w
         m = px(self, 26)
-        s = min((side_w - 2 * m) / (z_hi - z_lo), (H - 2 * m - px(self, 18)) / (2.16 * R))
+        path = self._path_visible()
+        rows = [r for r in ("kette", "gesamt", "rohteil") if dims[r]]
+        row_h = px(self, 24)
+        bottom = px(self, 24) + (px(self, 18) if path else 0) + len(rows) * row_h + (px(self, 12) if rows else 0)
+        top = px(self, 34)
+        s = min((side_w - 2 * m) / (z_hi - z_lo), max(20.0, H - top - bottom) / (2.1 * R))
         s = max(s, 0.1)
         cx0 = m + (side_w - 2 * m - (z_hi - z_lo) * s) / 2
-        cy = m + px(self, 10) + (H - 2 * m - px(self, 10)) / 2
+        cy = top + 1.05 * R * s
 
         def P(z: float, r: float) -> Tuple[float, float]:
             return cx0 + (z - z_lo) * s, cy - r * s
@@ -1180,9 +1227,18 @@ class KonturDialog(Dialog):
                        font=f.small_bold)
         # Mittellinie, Rohteil
         cv.create_line(*P(z_lo - 2, 0), *P(z_hi, 0), fill=C["faint"], dash=(12, 4, 2, 4))
-        x0, y0 = P(t.planaufmass, R)
-        x1, y1 = P(z_lo, -R)
-        cv.create_rectangle(x0, y0, x1 - 1, y1, outline=C["faint"], dash=(4, 3))
+        x0, y0 = P(max(0.0, t.planaufmass), R)
+        x1, y1 = P(stock_end if stock_end is not None else z_lo, -R)
+        if stock_end is not None:
+            cv.create_rectangle(x0, y0, x1, y1, outline=C["faint"], dash=(4, 3))
+        else:  # Stange: offen, mit Bruchlinie
+            cv.create_line(x1, y0, x0, y0, x0, y1, x1, y1, fill=C["faint"], dash=(4, 3))
+            zz = []
+            for i in range(7):
+                zz += [x1 + (px(self, 4) if i % 2 else -px(self, 4)), y0 + (y1 - y0) * i / 6]
+            cv.create_line(*zz, fill=C["faint"])
+            cv.create_text(x1 + px(self, 8), y1 - px(self, 4), text="Stange", anchor="sw", fill=C["faint"],
+                           font=self.fonts.small)
         geom = self.geom
         pl = polyline(geom.elems, 6.0) if geom.elems else [(p.z, p.x / 2) for p in t.punkte]
         if len(pl) >= 2:
@@ -1224,8 +1280,9 @@ class KonturDialog(Dialog):
         # Fräsungen
         for j, fr in enumerate(t.fraesungen):
             self._draw_feature_side(j, fr, P, s, sel == ("feat", j))
+        # Längenmaße unter dem Teil
+        self._draw_dims(dims, rows, P, cy + R * s + px(self, 20), row_h, R)
         # Werkzeugbahn (Drehen) – nur im Reiter „Code“
-        path = self._path_visible()
         if path:
             for mv in self.res.moves:
                 pts = mv.points()
@@ -1271,6 +1328,40 @@ class KonturDialog(Dialog):
             cv.create_line(lx, ly - px(self, 6), lx + px(self, 16), ly - px(self, 6), fill=PATH_G1)
             cv.create_text(lx + px(self, 20), ly, text="Vorschub", anchor="sw", fill=C["muted"], font=f.small)
         self._draw_end_view(side_w, W, H)
+
+    def _draw_dims(self, dims, rows, P, y0: float, row_h: float, R: float) -> None:
+        """Maßketten: Abschnitte der Kontur, Gesamtlänge, Rohteillänge (mit Maßhilfslinien)."""
+        cv = self.cv
+        t = self.teil
+
+        def r_at(z: float) -> float:
+            rs = [p.x / 2 for p in t.punkte if abs(p.z - z) < 1e-6]
+            return max(rs) if rs else R
+
+        arrow = (px(self, 7), px(self, 8), px(self, 3))
+        for k, row in enumerate(rows):
+            y = y0 + k * row_h
+            items = dims[row] if row == "kette" else [dims[row]]
+            last_left = None
+            for za, zb, length in items:
+                xa, xb = P(za, 0)[0], P(zb, 0)[0]
+                for x, z in ((xa, za), (xb, zb)):
+                    r = R if row == "rohteil" else r_at(z)
+                    cv.create_line(x, P(z, -r)[1] + px(self, 3), x, y + px(self, 5), fill=C["faint"])
+                cv.create_line(xb, y, xa, y, fill=C["muted"], arrow="both", arrowshape=arrow)
+                text = fmt(length) if row != "rohteil" else "Rohteil " + fmt(length)
+                ty = y - px(self, 1)
+                item = cv.create_text((xa + xb) / 2, ty, text=text, anchor="s", fill=C["text"],
+                                      font=self.fonts.small)
+                x0, _, x1, _ = cv.bbox(item)
+                if last_left is not None and x1 > last_left - px(self, 3):
+                    cv.move(item, 0, -px(self, 11))  # zu eng: Zahl etwas höher setzen
+                    last_left = None
+                else:
+                    last_left = x0
+                bb = cv.bbox(item)
+                back = cv.create_rectangle(bb[0] - 1, bb[1], bb[2] + 1, bb[3] - 1, fill=C["surface"], outline="")
+                cv.tag_lower(back, item)
 
     def _path_visible(self) -> bool:
         try:

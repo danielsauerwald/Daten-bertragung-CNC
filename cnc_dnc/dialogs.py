@@ -20,7 +20,7 @@ from .config import (
 )
 from .serial_link import list_ports
 from .files import subfolders
-from .system import IS_WIN, hide_touch_keyboard, toggle_touch_keyboard
+from .system import IS_WIN, fit_window, hide_touch_keyboard, toggle_touch_keyboard, window_decoration, work_area
 from .textutil import END_MODES
 from .theme import C, Fonts, px
 
@@ -46,6 +46,36 @@ class Dialog(tk.Toplevel):
         self.result = None
         self.destroy()
 
+    def place_on_screen(self, want_w: int, want_h: int, center_on_parent: bool = False) -> tuple:
+        """Fenster samt Titelleiste in den freien Bildschirmbereich legen (nicht unter die Taskleiste).
+
+        Ist es höher als der freie Bereich, wird es kleiner – die Tasten unten bleiben sichtbar.
+        Ergebnis: (w, h, x, y).
+        """
+        area = work_area(self)
+        parent = None
+        if center_on_parent:
+            parent = (self.parent.winfo_rootx(), self.parent.winfo_rooty(), self.parent.winfo_width(),
+                      self.parent.winfo_height())
+        w, h, x, y = fit_window(want_w, want_h, area, window_decoration(), parent)
+        if (w, h) != (want_w, want_h):
+            self._keep_buttons_visible()
+            self.geometry("{}x{}+{}+{}".format(w, h, x, y))
+        else:
+            self.geometry("+{}+{}".format(x, y))
+        self.placed = (w, h, x, y)
+        return self.placed
+
+    def _keep_buttons_visible(self) -> None:
+        """Die zuletzt gepackte Leiste (Tasten unten) zuerst einplanen, damit sie beim Verkleinern
+        nicht abgeschnitten wird – sonst schrumpft bei pack immer das zuletzt gepackte Element."""
+        kids = self.pack_slaves()
+        if len(kids) < 2:
+            return
+        info = kids[-1].pack_info()
+        if info.get("side") == "top" and not int(info.get("expand", 0)):
+            kids[-1].pack_configure(side="bottom", before=kids[0])
+
     def destroy(self) -> None:
         # Eine für diesen Dialog geöffnete Bildschirmtastatur wieder ausblenden
         if self.closes_keyboard:
@@ -54,13 +84,7 @@ class Dialog(tk.Toplevel):
 
     def show(self):
         self.update_idletasks()
-        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
-        pw, ph = self.parent.winfo_width(), self.parent.winfo_height()
-        px0, py0 = self.parent.winfo_rootx(), self.parent.winfo_rooty()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        x = max(0, min(sw - w, px0 + (pw - w) // 2))
-        y = max(0, min(sh - h - 40, py0 + (ph - h) // 3))
-        self.geometry("+{}+{}".format(x, y))
+        self.place_on_screen(self.winfo_reqwidth(), self.winfo_reqheight(), center_on_parent=True)
         self.deiconify()
         try:
             self.wait_visibility()

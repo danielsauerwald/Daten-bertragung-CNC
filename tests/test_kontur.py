@@ -601,3 +601,28 @@ def test_face_holes_must_sit_on_a_reachable_face():
     # mit dem Ø5-Bohrer käme man auf dem Weg dorthin an Ø20
     t.fraesungen = [Fraesung("bohrung_axial", [0], -15, 0, 5, 3, 24, 8)]
     assert "davor liegenden Durchmesser" in k.generate(t).errors[0]
+
+
+def test_length_dimensions_and_stock_length():
+    t = k.beispiel_teil()
+    d = k.masse(t)
+    assert d["kette"] == [(0, -15, 15), (-15, -30, 15), (-30, -40, 10)]  # Absätze ohne Länge
+    assert d["gesamt"] == (0, -40, 40)
+    assert d["rohteil"] == (0.5, -44.5, 45)
+    t.rohteil_l = 0  # Stange
+    assert k.masse(t)["rohteil"] is None
+    t.punkte = [KPunkt(0, 0), KPunkt(20, 0), KPunkt(20, -12)]
+    assert k.masse(t)["kette"] == [(0, -12, 12)] and k.masse(t)["gesamt"] is None
+
+
+def test_stock_length_is_checked_and_written():
+    t = k.beispiel_teil()
+    res = k.generate(t)
+    assert ";ROHTEIL D32 L45 NULLPUNKT MITTE STIRNSEITE Z0" in res.code
+    t.rohteil_l = 40.2  # Kontur 40 + Planaufmaß 0.5 passt nicht
+    assert "Rohteil nur 40.2" in k.generate(t).errors[0]
+    t.rohteil_l = 0
+    assert ";ROHTEIL D32 NULLPUNKT" in k.generate(t).code
+    t.rohteil_l = 42
+    t.fraesungen = [Fraesung("bohrung_radial", [0], -40, 0, 5, 3, 0, 6)]
+    assert "hinter das Rohteil" in k.generate(t).errors[0]

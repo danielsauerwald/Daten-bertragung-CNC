@@ -775,3 +775,98 @@ def test_machine_edit_dialog_has_postprocessor_tab(app, monkeypatch):
     dlg.save()
     prof = dlg.result
     assert fuer_maschine(prof).awz_ein == "S4={S} M4=3" and prof.id == m.id
+
+
+def _inside(widget, win):
+    """Liegt das Widget vollständig im Fenster (nicht abgeschnitten)?"""
+    win.update()
+    return (widget.winfo_ismapped() and widget.winfo_rooty() + widget.winfo_height() <= win.winfo_rooty()
+            + win.winfo_height() and widget.winfo_rootx() + widget.winfo_width() <= win.winfo_rootx()
+            + win.winfo_width())
+
+
+def test_kontur_dialog_fits_above_windows_taskbar(app, monkeypatch):
+    """Toughbook unter Windows: 1366x768, Taskleiste 40 px, Titelleiste 39 px -> Fenster 1350x689."""
+    import cnc_dnc.dialogs as dlgmod
+    from cnc_dnc.kontur import beispiel_teil
+    from cnc_dnc.kontur_dialog import KonturDialog
+    from cnc_dnc.postpro import vorlage
+    from cnc_dnc.postpro_dialog import PostproDialog
+
+    monkeypatch.setattr(dlgmod, "work_area", lambda w: (0, 0, 1366, 728))
+    monkeypatch.setattr(dlgmod, "window_decoration", lambda: (16, 39))
+    dlg = KonturDialog(app.root, app.fonts, beispiel_teil(), machines=app.cfg.machines, machine_id=app.machine.id)
+    w, h, x, y = dlg.place_on_screen(*dlg._size)
+    assert (w, h, x, y) == (1350, 689, 0, 0)
+    dlg.geometry("{}x{}+0+0".format(w, h))
+    dlg.deiconify()
+    for _ in range(3):
+        dlg.update()
+    for widget in (dlg.new_btn, dlg.insert_btn, dlg.cb_fine, dlg.cb_rough):
+        assert _inside(widget, dlg), widget
+    assert all(_inside(b, dlg) for b in dlg.sel_buttons.winfo_children())
+
+    def buttons(w):
+        for c in w.winfo_children():
+            if c.winfo_class() == "TButton":
+                yield c
+            yield from buttons(c)
+
+    for tab in range(5):  # alle Reiter: Tasten und Felder vollständig sichtbar
+        dlg.nb.select(tab)
+        dlg.update()
+        frame = dlg.nb.nametowidget(dlg.nb.select())
+        found = [b for b in buttons(frame) if b.winfo_ismapped()]
+        assert (found or tab == 4) and all(_inside(b, dlg) for b in found), tab
+    dlg.destroy()
+    pp = PostproDialog(app.root, app.fonts, "Emco", vorlage("sin_s3"))
+    w, h, x, y = pp.place_on_screen(*pp._size)
+    assert y + h + 39 <= 728
+    pp.geometry("{}x{}+0+0".format(w, h))
+    pp.deiconify()
+    assert _inside(pp.ok_btn, pp)
+    pp.destroy()
+
+
+def test_tall_dialog_is_shrunk_but_keeps_its_buttons(app, monkeypatch):
+    import cnc_dnc.dialogs as dlgmod
+    from cnc_dnc.kontur import Fraesung, beispiel_teil
+    from cnc_dnc.kontur_dialog import FeatureDialog
+
+    monkeypatch.setattr(dlgmod, "work_area", lambda w: (0, 0, 1366, 520))  # sehr wenig Platz
+    monkeypatch.setattr(dlgmod, "window_decoration", lambda: (16, 39))
+    dlg = FeatureDialog(app.root, app.fonts, beispiel_teil(), Fraesung("nut", entgraten=True, wz=5, wz_entgraten=7),
+                        "Nut")
+    dlg.update_idletasks()
+    req = dlg.winfo_reqheight()
+    w, h, x, y = dlg.place_on_screen(dlg.winfo_reqwidth(), req)
+    assert h < req and y + h + 39 <= 520
+    dlg.deiconify()
+    dlg.update()
+    ok = [b for bar in dlg.pack_slaves() for b in bar.winfo_children()
+          if b.winfo_class() == "TButton" and b.cget("text") == "Übernehmen"][0]
+    assert _inside(ok, dlg)
+    dlg.destroy()
+
+
+def test_drawing_shows_length_dimensions(app):
+    from cnc_dnc.kontur import beispiel_teil
+    from cnc_dnc.kontur_dialog import KonturDialog
+
+    dlg = KonturDialog(app.root, app.fonts, beispiel_teil(), machines=app.cfg.machines, machine_id=app.machine.id)
+    dlg.geometry("1350x689+0+0")
+    dlg.deiconify()
+    dlg.update()
+    dlg.redraw()
+    texts = [dlg.cv.itemcget(i, "text") for i in dlg.cv.find_all() if dlg.cv.type(i) == "text"]
+    for t in ("10", "15", "40", "Rohteil 45", "Ø20", "Ø26"):
+        assert t in texts, t
+    assert texts.count("15") == 2
+    # Spalte Länge in der Punktliste
+    assert dlg.pt_tree.item("p2", "values")[3] == "15" and dlg.pt_tree.item("p1", "values")[3] == ""
+    # Stange: kein Rohteilmaß, Hinweis in der Zeichnung
+    dlg.fvars["rohteil_l"].set("0")
+    dlg.refresh()
+    texts = [dlg.cv.itemcget(i, "text") for i in dlg.cv.find_all() if dlg.cv.type(i) == "text"]
+    assert "Stange" in texts and not any(t.startswith("Rohteil ") for t in texts)
+    dlg.destroy()

@@ -55,8 +55,7 @@ class PostproDialog(Dialog):
         self._loading = False
         self._job: Optional[str] = None
         bg = C["bg"]
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self._size = (min(sw - 24, px(self, 1240)), min(sh - 72, px(self, 700)))
+        self._size = (px(self, 1240), px(self, 700))  # show() passt das an den freien Bildschirm an
 
         head = tk.Frame(self, bg=bg)
         head.pack(fill="x", padx=px(self, 16), pady=(px(self, 12), px(self, 6)))
@@ -131,7 +130,8 @@ class PostproDialog(Dialog):
         self.preview.pack(side="left", fill="both", expand=True)
 
         bar = tk.Frame(self, bg=bg)
-        bar.pack(fill="x", padx=px(self, 16), pady=px(self, 12))
+        # vor dem Hauptteil packen: wird das Fenster kleiner, bleiben die Tasten sichtbar
+        bar.pack(fill="x", side="bottom", padx=px(self, 16), pady=px(self, 12), before=main)
         bar.grid_columnconfigure(0, weight=1)
         self.msg = tk.Label(bar, text="", bg=bg, fg=C["muted"], font=fonts.ui, anchor="w", justify="left",
                             wraplength=px(self, 760))
@@ -142,10 +142,18 @@ class PostproDialog(Dialog):
         self.update_view()
 
     def show(self):
-        w, h = self._size
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry("{}x{}+{}+{}".format(w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 2 - 20)))
-        return super().show()
+        w, h, x, y = self.place_on_screen(*self._size)
+        self.geometry("{}x{}+{}+{}".format(w, h, x, y))
+        self.deiconify()
+        try:
+            self.wait_visibility()
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.lift()
+        self.focus_force()
+        self.wait_window()
+        return self.result
 
     @staticmethod
     def _matching_preset(pp: Postprozessor) -> str:

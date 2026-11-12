@@ -106,3 +106,63 @@ def open_external(path: str) -> bool:
         return True
     except (OSError, ValueError):
         return False
+
+
+# --------------------------------------------------------------------------
+# Fenster in den freien Bereich (ohne Taskleiste) legen
+# --------------------------------------------------------------------------
+
+
+def work_area(widget) -> tuple:
+    """Freier Bildschirmbereich (x, y, Breite, Höhe) – unter Windows ohne Taskleiste.
+
+    Das Programm ist DPI-bewusst (enable_dpi_awareness), daher liefern Windows und Tk
+    dieselben (physischen) Pixel – auch bei 125 % oder 150 % Skalierung.
+    """
+    if IS_WIN:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            if _user32().SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+                return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+        except Exception:
+            pass
+    sw, sh = widget.winfo_screenwidth(), widget.winfo_screenheight()
+    return 0, 0, sw, sh - (48 if IS_WIN else 0)
+
+
+def window_decoration() -> tuple:
+    """(Breite, Höhe), die Windows um den Fensterinhalt legt: Rahmen und Titelleiste."""
+    if IS_WIN:
+        try:
+            u = _user32()
+            caption = u.GetSystemMetrics(4)  # SM_CYCAPTION
+            fx, fy = u.GetSystemMetrics(32), u.GetSystemMetrics(33)  # SM_CXSIZEFRAME, SM_CYSIZEFRAME
+            pad = u.GetSystemMetrics(92)  # SM_CXPADDEDBORDER
+            if caption > 0:
+                return 2 * (fx + pad), caption + 2 * (fy + pad)
+        except Exception:
+            pass
+        return 16, 39
+    return 0, 0
+
+
+def fit_window(want_w: int, want_h: int, area: tuple, deco: tuple, center_on=None) -> tuple:
+    """Größe und Lage (w, h, x, y) so, dass das ganze Fenster samt Titelleiste im freien
+    Bereich liegt. ``center_on``: (x, y, w, h) eines Fensters, über dem es mittig stehen soll."""
+    ax, ay, aw, ah = area
+    dw, dh = deco
+    w = max(200, min(int(want_w), aw - dw))
+    h = max(150, min(int(want_h), ah - dh))
+    if center_on:
+        cx, cy, cw, ch = center_on
+        x = cx + (cw - w) // 2
+        y = cy + (ch - h) // 3
+    else:
+        x = ax + (aw - w - dw) // 2
+        y = ay + (ah - h - dh) // 2
+    x = max(ax, min(x, ax + aw - w - dw))
+    y = max(ay, min(y, ay + ah - h - dh))
+    return w, h, x, y
