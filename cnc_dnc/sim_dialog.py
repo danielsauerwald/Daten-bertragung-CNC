@@ -385,18 +385,28 @@ class SimulationDialog(Dialog):
                 W, H = cv.winfo_width(), cv.winfo_height()
                 self._view = (s, W / 2 - sp[0] * s, H / 2 + sp[1] * s)
         sim = self.sim
-        cv.create_line(*self.P(sim.z_lo, 0), *self.P(sim.z_hi, 0), fill=C["faint"], dash=(12, 4, 2, 4))
+        self.achse_item = cv.create_line(*self.P(sim.z_lo, 0), *self.P(sim.z_hi, 0), fill=C["faint"],
+                                         dash=(12, 4, 2, 4))
         x0, y0 = self.P(sim.front, sim.R)
         x1, y1 = self.P(sim.stock_end, -sim.R)
         cv.create_rectangle(x0, y0, x1, y1, outline=C["faint"], dash=(4, 3))
         self.mat_oben = cv.create_polygon(0, 0, 0, 0, 0, 0, fill=MATERIAL, outline=MATERIAL_RAND, width=1)
         self.mat_unten = cv.create_polygon(0, 0, 0, 0, 0, 0, fill=MATERIAL, outline="", stipple="gray50")
+        self.bohr_item = cv.create_polygon(0, 0, 0, 0, 0, 0, fill=cv.cget("bg"), outline="")
+        cv.tag_raise(self.achse_item)
         ziel: List[float] = []
         for z, r in zip(sim.zc[::4], sim.ziel[::4]):
             if r >= 0:
                 ziel.extend(self.P(z, r))
         if len(ziel) >= 4:
             cv.create_line(*ziel, fill=ZIEL, dash=(5, 3), width=1)
+        if sim.gin.elems:  # Fertigkontur innen
+            innen: List[float] = []
+            for z, r in zip(sim.zc[::4], sim.ziel_innen[::4]):
+                if z <= 0 and 0 < r < float("inf"):
+                    innen.extend(self.P(z, r))
+            if len(innen) >= 4:
+                cv.create_line(*innen, fill=ZIEL, dash=(5, 3), width=1)
         self.halter_item = cv.create_polygon(0, 0, 0, 0, 0, 0, fill=HALTER_FARBE, outline="#4B5563", stipple="gray50")
         self.platte_item = cv.create_polygon(0, 0, 0, 0, 0, 0, fill=PLATTE_FARBE, outline="#5C4300", width=1)
         self.tip_item = cv.create_oval(0, 0, 0, 0, fill="#5C4300", outline="")
@@ -430,6 +440,11 @@ class SimulationDialog(Dialog):
                 lst.extend(self.P(pts[0][0], 0))
         cv.coords(self.mat_oben, *(oben if len(oben) >= 6 else [0, 0, 0, 0, 0, 0]))
         cv.coords(self.mat_unten, *(unten if len(unten) >= 6 else [0, 0, 0, 0, 0, 0]))
+        bohrung = sim.bohrung_jetzt(0.2 if not self._view else 0.05)
+        loch: List[float] = []
+        for z, r in bohrung + [(z, -r) for z, r in reversed(bohrung)]:
+            loch.extend(self.P(z, r))
+        cv.coords(self.bohr_item, *(loch if len(loch) >= 6 else [0, 0, 0, 0, 0, 0]))
         pos = sim.position
         if pos is not None:
             f, s = pos

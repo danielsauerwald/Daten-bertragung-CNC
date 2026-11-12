@@ -1,5 +1,7 @@
 """Simulation mit Plattenform: richtige Werkzeuge ohne Meldung, falsche werden erkannt."""
 
+import math
+
 import pytest
 
 from cnc_dnc import kontur as k
@@ -160,3 +162,67 @@ def test_old_tools_without_catalog_get_defaults():
     sim = _sim(t)
     assert any(e.art == "hinweis" and "VNMG" in e.text for e in sim.ereignisse)
     assert not [e for e in sim.ereignisse if e.schwer]
+
+
+# ---------------------------------------------------------------------------
+# Innen: Bohrer und Bohrstange
+# ---------------------------------------------------------------------------
+
+from test_kontur import buchse  # noqa: E402
+
+
+def _innen_sim(t, ohne=()):
+    res = k.generate(t, rahmen=True)
+    assert res.ok, res.errors
+    res.moves = [m for m in res.moves if m.t not in ohne]
+    sim = DrehSimulation(t, res)
+    sim.bis_ende()
+    return sim
+
+
+def _bei(sim, z):
+    i = int((z - sim.z_lo) / sim.dz)
+    return sim.h[i], sim.ziel_innen[i], sim.m[i]
+
+
+def test_bushing_simulates_without_problems():
+    sim = _innen_sim(buchse())
+    assert not [e for e in sim.ereignisse if e.schwer], [e.text for e in sim.ereignisse]
+    for z, d in ((-5, 24.0), (-15, 20.0), (-24.5, 20.0), (-26.5, 16.0)):
+        h, ziel, m = _bei(sim, z)
+        assert 2 * h == pytest.approx(d, abs=0.01) and 2 * ziel == pytest.approx(d, abs=0.01)
+        assert m == pytest.approx(20.0, abs=0.01)
+    h, ziel, _m = _bei(sim, -31.0)  # Bohrerspitze 118°
+    assert h == pytest.approx(8 - 3 * math.tan(math.radians(59)), abs=0.1) and h == pytest.approx(ziel, abs=0.05)
+    assert _bei(sim, -34.0)[0] == 0.0
+    # Ecke am Bohrungsgrund bleibt mit dem Eckenradius der Schlichtplatte
+    assert any(e.art == "radius" and "Bohrung" in e.text for e in sim.ereignisse)
+    assert sim.bohrung_jetzt() and all(r >= 0 for _, r in sim.bohrung_jetzt())
+
+
+def test_bushing_problems_are_detected():
+    # ohne Innen-Schlichten bleibt Material in der Bohrung
+    sim = _innen_sim(buchse(), ohne=(4,))
+    rest = [e for e in sim.ereignisse if e.art == "rest" and "Bohrung" in e.text]
+    assert rest and max(float(e.text.split("bis ")[1].split(" mm")[0]) for e in rest) == pytest.approx(2.0, abs=0.05)
+    # ohne Vorbohren fährt die Bohrstange ins volle Material
+    sim = _innen_sim(buchse(), ohne=(10,))
+    assert any(e.art == "halter" and "vorbohren" in e.text for e in sim.ereignisse)
+    # zu dicke Bohrstange: Stange stößt unterhalb der Achse an
+    t = buchse()
+    res = k.generate(t, rahmen=True)
+    t.tool(3).halter, t.tool(3).platte = "S25T-PCLNR12", "CNMG 120408-M"
+    sim = DrehSimulation(t, res)
+    sim.bis_ende()
+    hits = [e for e in sim.ereignisse if e.art == "halter"]
+    assert len(hits) == 1 and "S25T-PCLNR12" in hits[0].text and hits[0].t == 3
+
+
+def test_drill_form_and_tip():
+    from cnc_dnc.simulation import bohrerform
+
+    t = buchse()
+    f = bohrerform(t.tool(10))
+    assert f.innen and f.off == (0.0, 0.0) and f.platte.code == "HSS-BOHRER D16"
+    assert max(y for _, y in f.platte_rel) == pytest.approx(8.0) and min(y for _, y in f.platte_rel) == pytest.approx(-8.0)
+    assert min(x for x, _ in f.platte_rel) == 0.0  # Spitze = programmierter Punkt

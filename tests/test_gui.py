@@ -584,7 +584,7 @@ def test_kontur_dialog_new_program_flow(app, monkeypatch):
         _kontur_click(self, -4.5, 9)
         seen["feat"] = self.sel
         seen["msg"] = self.msg.cget("text")
-        self.nb.select(4)
+        self.nb.select(5)
         self.update()
         seen["code_tab"] = self.code_text.get("1.0", "3.0")
         assert self.res.ok, self.res.errors  # sonst öffnet finish() eine Meldung und der Test hängt
@@ -812,12 +812,12 @@ def test_kontur_dialog_fits_above_windows_taskbar(app, monkeypatch):
                 yield c
             yield from buttons(c)
 
-    for tab in range(5):  # alle Reiter: Tasten und Felder vollständig sichtbar
+    for tab in range(6):  # alle Reiter: Tasten und Felder vollständig sichtbar
         dlg.nb.select(tab)
         dlg.update()
         frame = dlg.nb.nametowidget(dlg.nb.select())
         found = [b for b in buttons(frame) if b.winfo_ismapped()]
-        assert (found or tab == 4) and all(_inside(b, dlg) for b in found), tab
+        assert (found or tab == 5) and all(_inside(b, dlg) for b in found), tab
     dlg.destroy()
     pp = PostproDialog(app.root, app.fonts, "Emco", vorlage("sin_s3"))
     w, h, x, y = pp.place_on_screen(*pp._size)
@@ -981,4 +981,78 @@ def test_simulation_dialog_milling_phase_and_strategy_choice(app):
     # zurück zum Drehen: Ansicht schaltet um
     dlg.gehe_zu(5)
     assert dlg.ab.phase == "dreh" and dlg._modus == "dreh"
+    dlg.destroy()
+
+
+def test_kontur_inner_tab_drawing_and_selection(app, monkeypatch):
+    from cnc_dnc import dialogs as dlgs
+    from cnc_dnc.kontur import KPunkt, beispiel_teil
+    from cnc_dnc.kontur_dialog import KonturDialog
+
+    t = beispiel_teil()
+    t.fraesungen = []
+    t.rohteil_d = 45.0
+    t.punkte = [KPunkt(0, 0), KPunkt(30, 0, "fase", 1.0), KPunkt(30, -25), KPunkt(40, -25), KPunkt(40, -35)]
+    dlg = KonturDialog(app.root, app.fonts, t, machines=app.cfg.machines, machine_id=app.machine.id)
+    dlg.geometry("1350x689+0+0")
+    dlg.deiconify()
+    dlg.update()
+    assert [dlg.nb.tab(i, "text") for i in range(dlg.nb.index("end"))] == [
+        "Kontur", "Innen", "Fräsen", "Werkzeuge", "Maschine", "Code"]
+    dlg.fvars["bohr_d"].set("16")
+    dlg.fvars["bohr_tiefe"].set("20")
+    dlg.append_inner_step(22, 8)
+    dlg.append_inner_step(18, 10)
+    dlg.append_inner_step(16, 0)
+    dlg.refresh()
+    assert [(p.x, p.z) for p in t.innen] == [(22, 0), (22, -8), (18, -8), (18, -18), (16, -18)]
+    assert dlg.res.ok, dlg.res.errors
+    assert "Innen fertigdrehen T4" in dlg.res.arbeitsgaenge
+    assert dlg.in_tree.item("i3", "values")[3] == "10"
+    assert dlg.cb_drill.get() == "T10 BOHRER D16" and dlg.cb_in_rough.get().startswith("T3 ")
+    # Innenkontur in der Zeichnung: Elemente und Punkte antippbar, Maßkette „innen“
+    tags = {tag for i in dlg.cv.find_all() for tag in dlg.cv.gettags(i)}
+    assert {"iseg1", "iseg3", "icorner0", "icorner4"} <= tags
+    texts = [dlg.cv.itemcget(i, "text") for i in dlg.cv.find_all() if dlg.cv.type(i) == "text"]
+    assert "innen" in texts and "Ø22" in texts
+    dlg.select("icorner", 1)
+    labels = [b.cget("text") for b in dlg.sel_buttons.winfo_children()]
+    assert labels[:4] == ["Scharf", "Entgraten", "Fase …", "Radius …"]
+    monkeypatch.setattr(dlgs, "ask_text", lambda *a, **kw: "0.4")
+    dlg.set_corner(1, "radius", innen=True)
+    dlg.refresh()
+    assert (t.innen[1].ecke, t.innen[1].wert) == ("radius", 0.4)
+    assert "CR=0.4" in dlg.res.code or "R0.4" in dlg.res.code  # Format laut Postprozessor der Maschine
+    assert dlg.in_tree.selection() == ("i1",)
+    dlg.select("iseg", 3)
+    assert "Bohrung Ø18" in dlg.sel_label.cget("text")
+    # Fehler in der Innenkontur: rote Linie, kein Code
+    t.innen.append(KPunkt(30, -19))
+    dlg.refresh()
+    assert not dlg.res.ok and "Innenkontur" in dlg.res.errors[0]
+    dlg.destroy()
+
+
+def test_tool_dialog_boring_bars_and_center_drill(app):
+    from cnc_dnc.kontur import LAGEN, Werkzeug
+    from cnc_dnc.werkzeug_dialog import WerkzeugDialog, halter_auswahl, lagen_auswahl
+
+    bars = halter_auswahl("innen")
+    assert len(bars) >= 20 and bars[0].startswith("A08") and "S40T-PCLNR12" in bars
+    assert LAGEN["mitte"] in lagen_auswahl("bohrer") and LAGEN["mitte"] not in lagen_auswahl("fraeser")
+    dlg = WerkzeugDialog(app.root, app.fonts, Werkzeug(3, 1, "", "innen", "", 0, 1800, 0.15, 1), "T3")
+    assert dlg.halter_lbl.cget("text") == "Bohrstange" and dlg.platte_cb.winfo_manager()
+    dlg.v["halter"].set("A16R-SCLCR09")
+    dlg._halter_changed()
+    assert dlg.v["platte"].get().startswith("CCMT 09") and dlg.v["name"].get() == "CCMT04"
+    assert "ab Bohrung Ø20" in dlg.info.cget("text")
+    dlg.ok()
+    assert (dlg.result.art, dlg.result.halter, dlg.result.lage) == ("innen", "A16R-SCLCR09", "")
+    dlg = WerkzeugDialog(app.root, app.fonts, Werkzeug(10, 1, "", "bohrer", "mitte", 0, 900, 0.12, 10), "T10")
+    assert dlg.v["lage"].get() == LAGEN["mitte"]
+    dlg.v["halter"].set("WSP-BOHRER D20")
+    dlg._halter_changed()
+    assert dlg.v["dm"].get() == "20" and "Drehmitte" in dlg.info.cget("text")
+    dlg.ok()
+    assert (dlg.result.lage, dlg.result.dm) == ("mitte", 20)
     dlg.destroy()

@@ -14,7 +14,7 @@ from .theme import C, Fonts, px
 from . import werkzeugkatalog as wk
 
 EIGENES = "(ohne Katalog)"
-DREHEN = ("schruppen", "schlichten")
+DREHEN = ("schruppen", "schlichten", "innen")
 
 
 def _inv(d: Dict[str, str]) -> Dict[str, str]:
@@ -23,11 +23,23 @@ def _inv(d: Dict[str, str]) -> Dict[str, str]:
 
 def halter_auswahl(art: str) -> List[str]:
     """Katalog-Einträge, die zur Werkzeugart passen."""
+    if art == "innen":  # Bohrstangen nach kleinster Bohrung
+        bars = [h for h in wk.HALTER if h.art == "innen"]
+        bars.sort(key=lambda h: (h.dmin, h.form, h.code))
+        return [h.code for h in bars]
     if art in DREHEN:
         aussen = [h for h in wk.HALTER if h.art == "aussen"]
         aussen.sort(key=lambda h: (h.hand != "R", h.form, h.code))
         return [h.code for h in aussen]
     return [w.code for w in wk.RUNDWERKZEUGE if w.art == art]
+
+
+def lagen_auswahl(art: str) -> List[str]:
+    """Mögliche Lagen: Drehwerkzeuge keine, Bohrer auch stehend in Drehmitte."""
+    if art in DREHEN:
+        return [LAGEN[""]]
+    keys = ["radial", "axial"] + (["mitte"] if art == "bohrer" else [])
+    return [LAGEN[k] for k in keys]
 
 
 class WerkzeugDialog(Dialog):
@@ -50,7 +62,8 @@ class WerkzeugDialog(Dialog):
         self._pair(("t", "T-Nummer", str(w.t), 6), ("d", "D", str(w.d), 4))
         self.art_cb = self._combo("art", "Art", TOOL_ARTEN[w.art], list(TOOL_ARTEN.values()))
         self.art_cb.bind("<<ComboboxSelected>>", lambda e: self._art_changed())
-        self.lage_cb = self._combo("lage", "Lage (angetrieben)", LAGEN.get(w.lage, LAGEN[""]), list(LAGEN.values()))
+        self.lage_cb = self._combo("lage", "Lage", LAGEN.get(w.lage, LAGEN[""]), list(LAGEN.values()))
+        self.lage_cb.bind("<<ComboboxSelected>>", lambda e: self._platte_changed())
         self.halter_lbl, self.halter_cb = self._combo("halter", "Halter", w.halter or EIGENES, [], with_label=True)
         self.halter_cb.bind("<<ComboboxSelected>>", lambda e: self._halter_changed())
         self.platte_lbl, self.platte_cb = self._combo("platte", "Platte", w.platte or EIGENES, [], with_label=True)
@@ -117,13 +130,15 @@ class WerkzeugDialog(Dialog):
     def _art_changed(self, initial: bool = False) -> None:
         art = self._art()
         turning = art in DREHEN
-        self.lage_cb.configure(state="disabled" if turning else "readonly")
+        lagen = lagen_auswahl(art)
+        self.lage_cb.configure(state="disabled" if turning else "readonly", values=lagen)
         if turning:
             self.v["lage"].set(LAGEN[""])
-        elif self.v["lage"].get() == LAGEN[""]:
+        elif self.v["lage"].get() not in lagen:
             self.v["lage"].set(LAGEN["radial"])
         choices = halter_auswahl(art)
-        self.halter_lbl.configure(text="Halter" if turning else "Werkzeug (Katalog)")
+        self.halter_lbl.configure(text={"innen": "Bohrstange"}.get(art, "Halter") if turning
+                                  else "Werkzeug (Katalog)")
         self.halter_cb.configure(values=[EIGENES] + choices)
         if self.v["halter"].get() not in choices:
             self.v["halter"].set(EIGENES)
@@ -183,6 +198,8 @@ class WerkzeugDialog(Dialog):
             parts.append(rw.beschreibung)
         if self._art() in DREHEN and not (h and p):
             parts.append("Ohne Halter und Platte nimmt die Simulation eine übliche Vorgabe.")
+        if self._art() == "bohrer" and self.v["lage"].get() == LAGEN["mitte"]:
+            parts.append("Stehend in Drehmitte: bohrt mit Spindeldrehzahl S und Vorschub mm/U (Vorbohren).")
         self.info.configure(text="  ·  ".join(parts))
 
     # -- Ergebnis -------------------------------------------------------------

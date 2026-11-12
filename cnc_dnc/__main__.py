@@ -130,6 +130,18 @@ def main(argv=None) -> int:
         fsim = FraesSimulation(beispiel_teil(), generate(beispiel_teil(), rahmen=True))
         fsim.bis_ende()
         assert fsim.fertig and not [e for e in fsim.ereignisse if e.schwer]
+        # Innenbearbeitung: Vorbohren in Drehmitte, Bohrstange schruppen/schlichten, Simulation
+        from .kontur import KPunkt, neues_teil
+
+        bu = neues_teil()
+        bu.rohteil_d, bu.rohteil_l, bu.bohr_d, bu.bohr_tiefe = 45.0, 40.0, 16.0, 28.0
+        bu.punkte = [KPunkt(0, 0), KPunkt(40, 0), KPunkt(40, -30), KPunkt(45, -30, op="frei")]
+        bu.innen = [KPunkt(24, 0, "fase", 0.5), KPunkt(24, -10), KPunkt(20, -10), KPunkt(20, -25)]
+        kres = generate(bu, rahmen=True)
+        assert kres.ok and ";VORBOHREN" in kres.code and "G41 G01 Z0" in kres.code, kres.errors
+        dsim = DrehSimulation(bu, kres)
+        dsim.bis_ende()
+        assert dsim.fertig and not [e for e in dsim.ereignisse if e.schwer]
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)

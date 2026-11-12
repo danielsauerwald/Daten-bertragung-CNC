@@ -24,6 +24,7 @@ from .kontur import (
     Werkzeug,
     beispiel_teil,
     build_geometry,
+    build_innen,
     contour_radius,
     fmt,
     generate,
@@ -286,7 +287,7 @@ class KonturDialog(Dialog):
         self.machine = next((m for m in self.machines if m.id == machine_id), None) or \
             (self.machines[0] if self.machines else None)
         self.pp: Postprozessor = fuer_maschine(self.machine) if self.machine else Postprozessor()
-        self.sel: Optional[Tuple[str, int]] = None  # ("seg"|"corner"|"feat", Nummer)
+        self.sel: Optional[Tuple[str, int]] = None  # ("seg"|"corner"|"iseg"|"icorner"|"feat", Nummer)
         self.geom: Geometrie = build_geometry(teil)
         self.res: Ergebnis = Ergebnis()
         self._job: Optional[str] = None
@@ -380,6 +381,7 @@ class KonturDialog(Dialog):
         self.nb.grid(row=0, column=0, sticky="nsew")
         self.fvars: Dict[str, tk.StringVar] = {}
         self._tab_kontur()
+        self._tab_innen()
         self._tab_fraesen()
         self._tab_werkzeuge()
         self._tab_postpro()
@@ -468,6 +470,43 @@ class KonturDialog(Dialog):
         self._field(turn, "kante", "Entgraten = Fase", 5, col=2, row=0)
         self._shrink_list_first(f, self.pt_tree)
 
+    def _tab_innen(self) -> None:
+        f = self._tab("Innen")
+        top = tk.Frame(f, bg=C["surface"])
+        top.pack(fill="x")
+        self._field(top, "bohr_d", "Vorbohren Ø", 6)
+        self._field(top, "bohr_tiefe", "Bohrtiefe", 6, col=2)
+        tk.Label(top, text="Bohrtiefe ohne Bohrerspitze, 0 = nicht bohren. Innenkontur: von der Stirnseite (Z0) "
+                           "nach innen, der Durchmesser wird kleiner oder bleibt gleich. Punkt 0 = Bohrungseingang "
+                           "(Fase/Radius dort = Kante am Eingang).", bg=C["surface"], fg=C["muted"],
+                 font=self.fonts.small, wraplength=px(self, 460), justify="left", anchor="w").grid(
+            row=1, column=0, columnspan=4, sticky="w")
+        self.in_tree = self._tree(f, [("nr", "Nr", 34), ("x", "X (Ø)", 60), ("z", "Z", 60), ("l", "Länge", 62),
+                                      ("ecke", "Ecke", 120)], height=5)
+        self.in_tree.bind("<<TreeviewSelect>>", self._in_selected)
+        self.in_tree.bind("<Double-1>", lambda e: self.edit_inner())
+        self._buttons(f, [("+ Absatz …", self.add_inner_step), ("+ Punkt …", self.add_inner_point),
+                          ("Ändern …", self.edit_inner), ("Löschen", self.delete_inner)])
+        tools = tk.Frame(f, bg=C["surface"])
+        tools.pack(fill="x", pady=(px(self, 8), 0))
+        tk.Label(tools, text="WERKZEUGE INNEN", bg=C["surface"], fg=C["faint"], font=self.fonts.small_bold).grid(
+            row=0, column=0, sticky="w")
+        self.cb_drill = self._tool_combo(tools, "Vorbohren", 1)
+        self.cb_in_rough = self._tool_combo(tools, "Schruppen", 2)
+        self.cb_in_fine = self._tool_combo(tools, "Schlichten", 3)
+        tk.Label(tools, text="Bohrer mit Lage „stehend (Drehmitte)“, Bohrstangen mit Art „Bohrstange (innen)“ "
+                             "– im Reiter Werkzeuge aus dem Katalog.", bg=C["surface"], fg=C["muted"],
+                 font=self.fonts.small, wraplength=px(self, 460), justify="left", anchor="w").grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(px(self, 4), 0))
+        self._shrink_list_first(f, self.in_tree)
+
+    def _tool_combo(self, parent, label: str, row: int) -> ttk.Combobox:
+        tk.Label(parent, text=label, bg=C["surface"], font=self.fonts.ui).grid(row=row, column=0, sticky="w")
+        cb = ttk.Combobox(parent, state="readonly", width=26, font=self.fonts.ui)
+        cb.grid(row=row, column=1, sticky="w", pady=px(self, 3), padx=(px(self, 6), 0))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._turn_tools())
+        return cb
+
     def _tab_fraesen(self) -> None:
         f = self._tab("Fräsen")
         tk.Label(f, text="Fräsungen und Bohrungen auf Winkellagen (C-Achse, Y-Achse). Auch über die Zeichnung: "
@@ -501,7 +540,7 @@ class KonturDialog(Dialog):
         self._shrink_list_first(f, self.wz_tree)
 
     def _tab_postpro(self) -> None:
-        f = self._tab("Postprozessor")
+        f = self._tab("Maschine")
         top = tk.Frame(f, bg=C["surface"])
         top.pack(fill="x")
         tk.Label(top, text="Maschine", bg=C["surface"], font=self.fonts.ui).pack(side="left")
@@ -588,6 +627,7 @@ class KonturDialog(Dialog):
 
     def _tab_code(self) -> None:
         f = self._tab("Code")
+        self.code_tab = f
         top = tk.Frame(f, bg=C["surface"])
         top.pack(fill="x")
         ttk.Checkbutton(top, text="Werkzeugbahn in der Zeichnung zeigen", variable=self.show_path,
@@ -656,12 +696,20 @@ class KonturDialog(Dialog):
         rough = _tool_choices(t, ("schruppen", "schlichten"))
         self.cb_rough.configure(values=rough)
         self.cb_fine.configure(values=rough)
-        for cb, nr in ((self.cb_rough, t.wz_schruppen), (self.cb_fine, t.wz_schlichten)):
+        bars = _tool_choices(t, ("innen",))
+        self.cb_in_rough.configure(values=bars)
+        self.cb_in_fine.configure(values=bars)
+        self.cb_drill.configure(values=_tool_choices(t, ("bohrer",), "mitte"))
+        for cb, nr in ((self.cb_rough, t.wz_schruppen), (self.cb_fine, t.wz_schlichten),
+                       (self.cb_drill, t.wz_bohren), (self.cb_in_rough, t.wz_innen_schruppen),
+                       (self.cb_in_fine, t.wz_innen_schlichten)):
             w = t.tool(nr)
             cb.set(w.label if w else "T{} ?".format(nr))
 
     def _turn_tools(self) -> None:
-        for cb, attr in ((self.cb_rough, "wz_schruppen"), (self.cb_fine, "wz_schlichten")):
+        for cb, attr in ((self.cb_rough, "wz_schruppen"), (self.cb_fine, "wz_schlichten"),
+                         (self.cb_drill, "wz_bohren"), (self.cb_in_rough, "wz_innen_schruppen"),
+                         (self.cb_in_fine, "wz_innen_schlichten")):
             nr = _tool_from_choice(cb.get())
             if nr is not None:
                 setattr(self.teil, attr, nr)
@@ -710,6 +758,16 @@ class KonturDialog(Dialog):
                                         _ecke_text(p, t) if 0 < i < len(t.punkte) - 1 else ""))
         if sel_pt and self.pt_tree.exists(sel_pt[0]):
             self.pt_tree.selection_set(sel_pt[0])
+        sel_in = self.in_tree.selection()
+        self.in_tree.delete(*self.in_tree.get_children())
+        n_in = len(t.innen) - 1
+        for i, p in enumerate(t.innen):
+            length = abs(p.z - t.innen[i - 1].z) if i else 0.0
+            self.in_tree.insert("", "end", iid="i{}".format(i),
+                                values=(i, fmt(p.x), fmt(p.z), fmt(length) if length > 1e-9 else "",
+                                        _ecke_text(p, t) if i < n_in else ""))
+        if sel_in and self.in_tree.exists(sel_in[0]):
+            self.in_tree.selection_set(sel_in[0])
         sel_ft = self.ft_tree.selection()
         self.ft_tree.delete(*self.ft_tree.get_children())
         for i, fr in enumerate(t.fraesungen):
@@ -723,7 +781,7 @@ class KonturDialog(Dialog):
             art = {"schruppen": "Schruppen", "schlichten": "Schlichten", "fraeser": "Fräser", "bohrer": "Bohrer",
                    "fase": "Fase"}.get(w.art, w.art)
             if w.lage:
-                art += " " + {"radial": "rad.", "axial": "ax."}.get(w.lage, w.lage)
+                art += " " + {"radial": "rad.", "axial": "ax.", "mitte": "Mitte"}.get(w.lage, w.lage)
             kat = " · ".join(x for x in (w.halter, w.platte) if x) or "–"
             self.wz_tree.insert("", "end", iid="t{}".format(w.t),
                                 values=(w.t, w.name, kat, art, fmt(w.s), fmt(w.f), fmt(w.ap) if w.ap else ""))
@@ -793,8 +851,8 @@ class KonturDialog(Dialog):
     def _replace_part(self, new: Teil, keep_tools: bool) -> None:
         old = self.teil
         if keep_tools:
-            for attr in ("werkzeuge", "wz_schruppen", "wz_schlichten", "aufmass_x", "aufmass_z", "kante",
-                         "sicherheit"):
+            for attr in ("werkzeuge", "wz_schruppen", "wz_schlichten", "wz_bohren", "wz_innen_schruppen",
+                         "wz_innen_schlichten", "aufmass_x", "aufmass_z", "kante", "sicherheit"):
                 setattr(new, attr, getattr(old, attr))
         self.teil.__dict__.update(new.__dict__)
         self.sel = None
@@ -904,16 +962,117 @@ class KonturDialog(Dialog):
         self._update_selection()
         self.redraw()
 
+    # ------------------------------------------------------------- Innenkontur
+
+    def _selected_inner(self) -> Optional[int]:
+        sel = self.in_tree.selection()
+        return int(sel[0][1:]) if sel else None
+
+    def add_inner_step(self) -> None:
+        t = self.teil
+        last = t.innen[-1] if t.innen else None
+        if last is None:
+            msg = "Bohrung ab der Stirnseite (Z0): Durchmesser und Länge nach innen."
+            vorschlag = fmt(t.bohr_d + 4) if t.bohr_d > 0 else ""
+        else:
+            msg = "Vom letzten Punkt (X{} Z{}) senkrecht auf den (kleineren) Durchmesser, dann die Länge nach " \
+                  "innen. Länge 0 = nur der Absatz (z. B. Bohrungsgrund bis auf die Vorbohrung).".format(
+                      fmt(last.x), fmt(last.z))
+            vorschlag = fmt(t.bohr_d) if t.bohr_d > 0 else fmt(last.x)
+        res = FormDialog(self, self.fonts, "Bohrung / Absatz innen",
+                         [("x", "Durchmesser Ø", vorschlag), ("l", "Länge", "")], message=msg).show()
+        if not res:
+            return
+        try:
+            x, ln = parse_num(res["x"]), parse_num(res["l"] or "0")
+        except ValueError:
+            dialogs.error(self, self.fonts, "Ungültige Eingabe", "Durchmesser und Länge als Zahl eingeben.")
+            return
+        self.append_inner_step(x, ln)
+
+    def append_inner_step(self, x: float, laenge: float) -> None:
+        t = self.teil
+        if not t.innen:
+            t.innen.append(KPunkt(x, 0.0))
+        last = t.innen[-1]
+        if abs(x - last.x) > 1e-9:
+            t.innen.append(KPunkt(x, last.z))
+        if laenge > 0:
+            t.innen.append(KPunkt(x, t.innen[-1].z - abs(laenge)))
+        self.changed()
+
+    def add_inner_point(self) -> None:
+        t = self.teil
+        last = t.innen[-1] if t.innen else KPunkt(t.bohr_d + 4 if t.bohr_d > 0 else 0, 0.0)
+        res = FormDialog(self, self.fonts, "Punkt innen einfügen",
+                         [("x", "X (Durchmesser)", fmt(last.x) if last.x else ""), ("z", "Z", fmt(last.z))],
+                         message="Der Punkt kommt hinter den markierten Punkt bzw. ans Ende. Der erste Punkt "
+                                 "liegt an der Stirnseite (Z0).").show()
+        if not res:
+            return
+        try:
+            x, z = parse_num(res["x"]), parse_num(res["z"])
+        except ValueError:
+            dialogs.error(self, self.fonts, "Ungültige Eingabe", "X und Z als Zahl eingeben.")
+            return
+        after = self._selected_inner()
+        pos = len(t.innen) if after is None else after + 1
+        t.innen.insert(pos, KPunkt(x, z))
+        self.changed()
+
+    def edit_inner(self, i: Optional[int] = None) -> None:
+        t = self.teil
+        if i is None:
+            i = self._selected_inner()
+        if i is None or i >= len(t.innen):
+            dialogs.info(self, self.fonts, "Punkt wählen", "Bitte zuerst einen Punkt der Innenkontur antippen.")
+            return
+        p = t.innen[i]
+        fields = [("x", "X (Durchmesser)", fmt(p.x)), ("z", "Z", fmt(p.z))]
+        if i < len(t.innen) - 1:
+            fields += [("ecke", "Ecke" if i else "Kante am Eingang", ECKEN[p.ecke], list(ECKEN.values())),
+                       ("wert", "Fase / Radius (mm)", fmt(p.wert) if p.wert else "")]
+        res = FormDialog(self, self.fonts, "Innen Punkt {} ändern".format(i), fields).show()
+        if not res:
+            return
+        try:
+            p.x, p.z = parse_num(res["x"]), parse_num(res["z"])
+            if "ecke" in res:
+                p.ecke = _inv(ECKEN)[res["ecke"]]
+                p.wert = parse_num(res["wert"]) if res["wert"] else 0.0
+        except (ValueError, KeyError):
+            dialogs.error(self, self.fonts, "Ungültige Eingabe", "Bitte Zahlen eintragen (Komma oder Punkt).")
+        self.changed()
+
+    def delete_inner(self) -> None:
+        i = self._selected_inner()
+        if i is None:
+            dialogs.info(self, self.fonts, "Punkt wählen", "Bitte einen Punkt der Innenkontur antippen.")
+            return
+        del self.teil.innen[i]
+        if self.sel and self.sel[0] in ("iseg", "icorner"):
+            self.sel = None
+        self.changed()
+
+    def _in_selected(self, _e=None) -> None:
+        i = self._selected_inner()
+        if i is None or self.sel in (("icorner", i), ("iseg", i)):
+            return
+        self.sel = ("icorner", i)
+        self._update_selection()
+        self.redraw()
+
     # ---------------------------------------------------------- Elemente/Ecken
 
     def set_segment_op(self, i: int, op: str) -> None:
         self.teil.punkte[i].op = op
         self.changed()
 
-    def set_corner(self, i: int, ecke: str, wert: Optional[float] = None) -> None:
-        p = self.teil.punkte[i]
+    def set_corner(self, i: int, ecke: str, wert: Optional[float] = None, innen: bool = False) -> None:
+        p = (self.teil.innen if innen else self.teil.punkte)[i]
         if ecke in ("fase", "radius") and wert is None:
-            v = dialogs.ask_text(self, self.fonts, ECKEN[ecke], "{} an Punkt {} (mm):".format(ECKEN[ecke], i),
+            v = dialogs.ask_text(self, self.fonts, ECKEN[ecke], "{} an {}Punkt {} (mm):".format(
+                ECKEN[ecke], "Innen-" if innen else "", i),
                                  fmt(p.wert) if p.ecke == ecke and p.wert else ("0.5" if ecke == "fase" else "1"))
             if v is None:
                 return
@@ -1081,6 +1240,8 @@ class KonturDialog(Dialog):
             self.pt_tree.selection_set("p{}".format(nr))
         elif kind == "seg" and self.pt_tree.exists("p{}".format(nr)):
             self.pt_tree.selection_set("p{}".format(nr))
+        elif kind in ("icorner", "iseg") and self.in_tree.exists("i{}".format(nr)):
+            self.in_tree.selection_set("i{}".format(nr))
         elif kind == "feat" and self.ft_tree.exists("f{}".format(nr)):
             self.ft_tree.selection_set("f{}".format(nr))
         self._update_selection()
@@ -1105,9 +1266,13 @@ class KonturDialog(Dialog):
             sel = self.sel = None
         if sel and sel[0] == "feat" and sel[1] >= len(t.fraesungen):
             sel = self.sel = None
+        n_in = len(t.innen) - 1
+        if sel and ((sel[0] == "icorner" and not 0 <= sel[1] <= n_in) or (sel[0] == "iseg" and not 0 < sel[1] <= n_in)):
+            sel = self.sel = None
         if not sel:
             self.sel_label.configure(text="Element, Ecke (Punkt) oder Fräsung in der Zeichnung antippen.")
             self._bar_button("+ Absatz …", self.add_step)
+            self._bar_button("+ Innenkontur …", self.add_inner_step)
             self._bar_button("+ Fläche", lambda: self.add_feature("flaeche"))
             self._bar_button("+ Nut", lambda: self.add_feature("nut"))
             self._bar_button("+ Bohrung", lambda: self.add_feature("bohrung_radial"))
@@ -1143,6 +1308,31 @@ class KonturDialog(Dialog):
                 self._bar_button("Fase …", lambda: self.set_corner(i, "fase"), p.ecke == "fase")
                 self._bar_button("Radius …", lambda: self.set_corner(i, "radius"), p.ecke == "radius")
             self._bar_button("Punkt ändern …", lambda: self.edit_point(i))
+        elif kind == "iseg":
+            a, b = t.innen[i - 1], t.innen[i]
+            if abs(a.z - b.z) < 1e-9:
+                form = "Absatz innen Ø{} → Ø{}".format(fmt(a.x), fmt(b.x))
+            elif abs(a.x - b.x) < 1e-9:
+                form = "Bohrung Ø{}".format(fmt(a.x))
+            else:
+                form = "Innenkegel Ø{} → Ø{}".format(fmt(a.x), fmt(b.x))
+            self.sel_label.configure(text="Innen Element {}:  {}   (X{} Z{} → X{} Z{})".format(
+                i, form, fmt(a.x), fmt(a.z), fmt(b.x), fmt(b.z)))
+            self._bar_button("Punkt ändern …", lambda: self.edit_inner(i))
+            self._bar_button("+ Absatz innen …", self.add_inner_step)
+        elif kind == "icorner":
+            p = t.innen[i]
+            was = "Kante am Eingang" if i == 0 else "Kante"
+            self.sel_label.configure(text="Innen Punkt {}:  X{} Z{}{}".format(
+                i, fmt(p.x), fmt(p.z), "   ·   {}: {}".format(was, _ecke_text(p, t) or "scharf") if i < n_in
+                else "   ·   Ende der Innenkontur"))
+            if i < n_in:
+                self._bar_button("Scharf", lambda: self.set_corner(i, "", innen=True), p.ecke == "")
+                self._bar_button("Entgraten", lambda: self.set_corner(i, "entgraten", innen=True),
+                                 p.ecke == "entgraten")
+                self._bar_button("Fase …", lambda: self.set_corner(i, "fase", innen=True), p.ecke == "fase")
+                self._bar_button("Radius …", lambda: self.set_corner(i, "radius", innen=True), p.ecke == "radius")
+            self._bar_button("Punkt ändern …", lambda: self.edit_inner(i))
         else:
             fr = t.fraesungen[i]
             self.sel_label.configure(text="Fräsung {}:  {}  ·  {}  ·  C {}°  ·  {}".format(
@@ -1159,13 +1349,13 @@ class KonturDialog(Dialog):
         Fräsungen einen kleineren – so trifft man eine Ecke auf der Linie, aber eine Fräsung, in die man
         hineintippt, auch wenn eine Ecke in der Nähe liegt."""
         r = px(self, 14)
-        bonus = {"corner": px(self, 10), "feat": px(self, 3), "seg": 0}
+        bonus = {"corner": px(self, 10), "icorner": px(self, 10), "feat": px(self, 3), "seg": 0, "iseg": 0}
         items = self.cv.find_overlapping(event.x - r, event.y - r, event.x + r, event.y + r)
         best: Optional[Tuple[float, str, int]] = None
         for item in items:
             d = self._distance(item, event.x, event.y)
             for tag in self.cv.gettags(item):
-                for kind in ("corner", "feat", "seg"):
+                for kind in ("icorner", "iseg", "corner", "feat", "seg"):
                     if tag.startswith(kind) and tag[len(kind):].isdigit():
                         score = d - bonus[kind]
                         if best is None or score < best[0]:
@@ -1209,7 +1399,8 @@ class KonturDialog(Dialog):
         dims = masse(t)
         stock_end = dims["rohteil"][1] if dims["rohteil"] else None
         z_last = min([p.z for p in t.punkte] + [min(f.z1, f.z2) for f in t.fraesungen if f.art in ("flaeche", "nut")]
-                     + [f.z1 for f in t.fraesungen if f.art == "bohrung_radial"]
+                     + [f.z1 for f in t.fraesungen if f.art == "bohrung_radial"] + [p.z for p in t.innen]
+                     + ([-t.bohr_tiefe] if t.bohr_d > 0 and t.bohr_tiefe > 0 else [])
                      + ([stock_end] if stock_end is not None else []))
         z_lo = z_last - (max(2.0, 0.05 * max(10.0, -z_last)) if stock_end is not None and stock_end <= z_last + 1e-6
                          else max(4.0, 0.12 * max(10.0, -z_last)))
@@ -1218,7 +1409,7 @@ class KonturDialog(Dialog):
         side_w = W - end_w
         m = px(self, 26)
         path = self._path_visible()
-        rows = [r for r in ("kette", "gesamt", "rohteil") if dims[r]]
+        rows = [r for r in ("kette", "innen", "gesamt", "rohteil") if dims[r]]
         row_h = px(self, 24)
         bottom = px(self, 24) + (px(self, 18) if path else 0) + len(rows) * row_h + (px(self, 12) if rows else 0)
         top = px(self, 34)
@@ -1235,7 +1426,7 @@ class KonturDialog(Dialog):
         cv.create_text(px(self, 10), px(self, 8), text="Seitenansicht", anchor="nw", fill=C["faint"],
                        font=f.small_bold)
         # Mittellinie, Rohteil
-        cv.create_line(*P(z_lo - 2, 0), *P(z_hi, 0), fill=C["faint"], dash=(12, 4, 2, 4))
+        achse = cv.create_line(*P(z_lo - 2, 0), *P(z_hi, 0), fill=C["faint"], dash=(12, 4, 2, 4))
         x0, y0 = P(max(0.0, t.planaufmass), R)
         x1, y1 = P(stock_end if stock_end is not None else z_lo, -R)
         if stock_end is not None:
@@ -1261,6 +1452,8 @@ class KonturDialog(Dialog):
             cv.create_line(*low, fill="#9FB3CC", width=2)
             cv.create_line(*P(pl[-1][0], pl[-1][1]), *P(pl[-1][0], -pl[-1][1]), fill="#9FB3CC", width=1)
         sel = self.sel
+        gin = self._draw_bore(P)
+        cv.tag_raise(achse)
         # Konturelemente
         if geom.errors:
             raw: List[float] = []
@@ -1322,6 +1515,8 @@ class KonturDialog(Dialog):
                            tags=("corner{}".format(i),))
             cv.create_text(x + rr + 2, y - rr - 2, text=str(i), anchor="sw", fill=C["muted"], font=f.small,
                            tags=("corner{}".format(i),))
+        if gin is not None:
+            self._draw_inner(gin, P, s)
         # Legende
         lx, ly = px(self, 10), H - px(self, 10)
         for color, text in ((C["primary"], "drehen"), (C["faint"], "nicht drehen"), (C["warn"], "entgraten"),
@@ -1338,6 +1533,98 @@ class KonturDialog(Dialog):
             cv.create_text(lx + px(self, 20), ly, text="Vorschub", anchor="sw", fill=C["muted"], font=f.small)
         self._draw_end_view(side_w, W, H)
 
+    def _bore_profile(self, gin: Geometrie) -> List[Tuple[float, float]]:
+        """Bohrung (z, r) von der Stirnseite nach innen, mit Vorbohrung und Bohrerspitze."""
+        from .werkzeugkatalog import rundwerkzeug
+
+        t = self.teil
+        pts = polyline(gin.elems, 6.0) if gin.elems else []
+        if t.bohr_d > 0 and t.bohr_tiefe > 0:
+            rd = t.bohr_d / 2
+            if not pts:
+                pts = [(0.0, rd)]
+            z_end = pts[-1][0]
+            if -t.bohr_tiefe < z_end - 1e-9:
+                if abs(pts[-1][1] - rd) > 1e-9:
+                    pts.append((z_end, rd))
+                pts.append((-t.bohr_tiefe, rd))
+            drill = t.tool(t.wz_bohren)
+            rw = rundwerkzeug(drill.halter) if drill is not None else None
+            winkel = rw.spitzenwinkel if rw is not None else 118.0
+            kegel = rd / math.tan(math.radians(winkel / 2)) if winkel < 179 else 0.0
+            pts.append((min(z_end, -t.bohr_tiefe) - kegel, 0.0))
+        elif pts:
+            pts.append((pts[-1][0], 0.0))
+        return pts
+
+    def _draw_bore(self, P) -> Optional[Geometrie]:
+        t = self.teil
+        if not t.innen and not (t.bohr_d > 0 and t.bohr_tiefe > 0):
+            return None
+        gin = build_innen(t)
+        cv = self.cv
+        if gin.errors:
+            raw: List[float] = []
+            for p in t.innen:
+                raw.extend(P(p.z, p.x / 2))
+            if len(raw) >= 4:
+                cv.create_line(*raw, fill=C["error"], width=3)
+            return gin
+        pts = self._bore_profile(gin)
+        if len(pts) >= 2:
+            poly: List[float] = []
+            for z, r in pts + [(z, -r) for z, r in reversed(pts)]:
+                poly.extend(P(z, r))
+            cv.create_polygon(*poly, fill=C["surface"], outline="")
+            low: List[float] = []
+            for z, r in pts:
+                low.extend(P(z, -r))
+            cv.create_line(*low, fill="#9FB3CC", width=2)
+            n_kontur = len(polyline(gin.elems, 6.0)) if gin.elems else 0
+            vor = pts[max(0, n_kontur - 1):]
+            if len(vor) >= 2:  # Vorbohrung hinter der Innenkontur
+                xy: List[float] = []
+                for z, r in vor:
+                    xy.extend(P(z, r))
+                cv.create_line(*xy, fill=C["muted"], width=2, dash=(6, 3))
+        return gin
+
+    def _draw_inner(self, gin: Geometrie, P, s: float) -> None:
+        cv = self.cv
+        t = self.teil
+        sel = self.sel
+        f = self.fonts
+        for e in gin.elems:
+            if e.seg >= 0:
+                tag, selected = "iseg{}".format(e.seg), sel == ("iseg", e.seg)
+            else:
+                tag, selected = "icorner{}".format(e.corner), sel == ("icorner", e.corner)
+            xy: List[float] = []
+            for z, r in [(e.z0, e.r0)] + e.points(6.0):
+                xy.extend(P(z, r))
+            cv.create_line(*xy, fill=SEL_COLOR if selected else C["primary"], width=px(self, 7 if selected else 4),
+                           capstyle="round", tags=(tag,))
+            cv.create_line(*xy, fill="", width=px(self, 22), tags=(tag,))
+            if e.seg >= 0 and abs(e.r1 - e.r0) < 1e-9 and abs(e.z1 - e.z0) * s > px(self, 34):
+                mx, my = P((e.z0 + e.z1) / 2, e.r0)
+                cv.create_text(mx, my + px(self, 12), text="Ø" + fmt(2 * e.r0), fill=C["muted"], font=f.small)
+        n = len(t.innen) - 1
+        for i, p in enumerate(t.innen):
+            x, y = P(p.z, p.x / 2)
+            rr = px(self, 9 if sel == ("icorner", i) else 7)
+            if sel == ("icorner", i):
+                fill = SEL_COLOR
+            elif p.ecke == "entgraten" and i < n:
+                fill = C["warn"]
+            elif p.ecke in ("fase", "radius") and i < n:
+                fill = C["primary"]
+            else:
+                fill = C["surface"]
+            cv.create_oval(x - rr, y - rr, x + rr, y + rr, fill=fill, outline=C["text"], width=1,
+                           tags=("icorner{}".format(i),))
+            cv.create_text(x + rr + 2, y + rr + 2, text="i{}".format(i), anchor="nw", fill=C["muted"],
+                           font=f.small, tags=("icorner{}".format(i),))
+
     def _draw_dims(self, dims, rows, P, y0: float, row_h: float, R: float) -> None:
         """Maßketten: Abschnitte der Kontur, Gesamtlänge, Rohteillänge (mit Maßhilfslinien)."""
         cv = self.cv
@@ -1347,15 +1634,22 @@ class KonturDialog(Dialog):
             rs = [p.x / 2 for p in t.punkte if abs(p.z - z) < 1e-6]
             return max(rs) if rs else R
 
+        def r_innen(z: float) -> float:
+            rs = [p.x / 2 for p in t.innen if abs(p.z - z) < 1e-6]
+            return min(rs) if rs else t.bohr_d / 2
+
         arrow = (px(self, 7), px(self, 8), px(self, 3))
         for k, row in enumerate(rows):
             y = y0 + k * row_h
-            items = dims[row] if row == "kette" else [dims[row]]
+            items = dims[row] if row in ("kette", "innen") else [dims[row]]
             last_left = None
+            if row == "innen":
+                cv.create_text(P(min(z for _, z, _ in items), 0)[0] - px(self, 6), y, text="innen", anchor="e",
+                               fill=C["muted"], font=self.fonts.small)
             for za, zb, length in items:
                 xa, xb = P(za, 0)[0], P(zb, 0)[0]
                 for x, z in ((xa, za), (xb, zb)):
-                    r = R if row == "rohteil" else r_at(z)
+                    r = R if row == "rohteil" else (r_innen(z) if row == "innen" else r_at(z))
                     cv.create_line(x, P(z, -r)[1] + px(self, 3), x, y + px(self, 5), fill=C["faint"])
                 cv.create_line(xb, y, xa, y, fill=C["muted"], arrow="both", arrowshape=arrow)
                 text = fmt(length) if row != "rohteil" else "Rohteil " + fmt(length)
@@ -1374,7 +1668,7 @@ class KonturDialog(Dialog):
 
     def _path_visible(self) -> bool:
         try:
-            on_code_tab = self.nb.index("current") == 4
+            on_code_tab = self.nb.index("current") == self.nb.index(self.code_tab)
         except tk.TclError:
             on_code_tab = False
         return bool(on_code_tab and self.show_path.get() and self.res.ok and self.res.moves)

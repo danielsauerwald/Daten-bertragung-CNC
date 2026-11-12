@@ -9,6 +9,7 @@ Spitze mit) prüft, dass
 * nach dem Schlichten genau die Kontur übrig bleibt.
 """
 
+import json
 import math
 import re
 
@@ -626,3 +627,120 @@ def test_stock_length_is_checked_and_written():
     t.rohteil_l = 42
     t.fraesungen = [Fraesung("bohrung_radial", [0], -40, 0, 5, 3, 0, 6)]
     assert "hinter das Rohteil" in k.generate(t).errors[0]
+
+
+# ---------------------------------------------------------------------------
+# Innenbearbeitung: Vorbohren, Bohrstange schruppen/schlichten
+# ---------------------------------------------------------------------------
+
+
+def buchse(**kw):
+    """Buchse Ø40 mit Bohrung Ø24/Ø20, vorgebohrt Ø16 (Standardwerkzeuge T3, T4, T10)."""
+    t = k.neues_teil()
+    t.name = "BUCHSE"
+    t.rohteil_d, t.rohteil_l = 45.0, 40.0
+    t.punkte = [KPunkt(0, 0), KPunkt(40, 0, "fase", 1.0), KPunkt(40, -30), KPunkt(45, -30, op="frei")]
+    t.bohr_d, t.bohr_tiefe = 16.0, 28.0
+    t.innen = [KPunkt(24, 0, "fase", 0.5), KPunkt(24, -10, "radius", 0.4), KPunkt(20, -10), KPunkt(20, -25),
+               KPunkt(16, -25)]
+    for key, v in kw.items():
+        setattr(t, key, v)
+    return t
+
+
+def test_bushing_program_order_and_moves():
+    res = k.generate(buchse(), rahmen=True)
+    assert res.ok, res.errors
+    assert res.arbeitsgaenge == ["Vordrehen T1", "Bohren Ø16 T10", "Innen vordrehen T3", "Fertigdrehen T2",
+                                 "Innen fertigdrehen T4"]
+    lines = res.code.split("\n")
+    i_drill = lines.index(";VORBOHREN BOHRER D16")
+    assert lines[i_drill + 1] == "T10D1 G95 G18 S900 M3 M8"
+    assert lines[i_drill + 2] == "G00 X0 Z2.5"
+    # Spitze: 28 mm voller Durchmesser + Kegel 8/tan(59°)
+    tip = -(28 + 8 / math.tan(math.radians(59)))
+    assert "G01 Z{:.3f}".format(tip).rstrip("0") in lines
+    i_rough = lines.index(";INNEN VORDREHEN DCMT04")
+    rough = lines[i_rough:lines.index("G00 X150", i_rough)]
+    assert "G00 X15 Z2.5" in rough  # in der Vorbohrung anfahren
+    assert all(not ln.startswith("G00") or "Z2.5" in ln or "X" in ln for ln in rough[2:])
+    xs = [float(ln.split("X")[1].split()[0]) for ln in rough if ln.startswith("G00 X") and "Z" not in ln]
+    assert xs == sorted(xs) and xs[-1] == pytest.approx(24.6)  # nach außen zustellen, bis Aufmaß
+    i_fine = lines.index(";INNEN FERTIGDREHEN DCMT02")
+    fine = lines[i_fine:lines.index("G00 Z130", i_fine) + 1]
+    assert fine[2:6] == ["G00 X25 Z2.5", "G41 G01 Z0 F0.08", "G01 X24 Z-0.5", "G01 Z-9.6"]
+    assert "G03 X23.2 Z-10 CR=0.4" in fine
+    # erst in Z aus der Bohrung, dann in X zum Wechselpunkt
+    assert fine[-3:] == ["G40 G00 Z2.5", "G00 X150", "G00 Z130"]
+    assert lines.index(";FERTIGDREHEN VCMT04") < i_fine
+
+
+def test_bushing_fanuc():
+    res = k.generate(buchse(), pp=vorlage("fanuc"))
+    assert res.ok, res.errors
+    assert "(VORBOHREN BOHRER D16)" in res.code and "T1001" in res.code
+    assert "G41 G01 Z0. F0.08" in res.code and "G03 X23.2 Z-10. R0.4" in res.code
+
+
+def test_drilling_without_inner_contour():
+    t = k.beispiel_teil()
+    t.fraesungen = []
+    t.bohr_d, t.bohr_tiefe = 10.0, 12.0
+    t.tool(10).halter, t.tool(10).dm = "VHM-BOHRER D10", 10.0
+    res = k.generate(t)
+    assert res.ok, res.errors
+    assert res.arbeitsgaenge == ["Vordrehen T1", "Bohren Ø10 T10", "Fertigdrehen T2"]
+    assert "INNEN" not in res.code
+    t.bohr_tiefe = 60.0
+    assert any("zu kurz" in e for e in k.generate(t).errors)
+    t.bohr_tiefe, t.bohr_d = 12.0, 19.5
+    assert any("Wand zu dünn" in e for e in k.generate(t).errors)
+
+
+@pytest.mark.parametrize("change,needle", [
+    (lambda t: setattr(t, "bohr_d", 0.0), "Vorbohren"),
+    (lambda t: setattr(t, "bohr_tiefe", 20.0), "reicht nicht"),
+    (lambda t: t.innen.insert(2, KPunkt(26, -12)), "nach innen verlaufen"),
+    (lambda t: setattr(t.innen[1], "x", 15.0), "kleiner als die Vorbohrung"),
+    (lambda t: setattr(t.innen[0], "z", -1.0), "Stirnseite"),
+    (lambda t: setattr(t.innen[0], "x", 39.5), "Wand zu dünn"),
+    (lambda t: setattr(t.tool(10), "lage", "axial"), "Drehmitte"),
+    (lambda t: setattr(t.tool(3), "art", "schruppen"), "keine Bohrstange"),
+    (lambda t: t.tool(3).__dict__.update(halter="S25T-PCLNR12", platte="CNMG 120408-M"), "braucht mindestens Ø32"),
+    (lambda t: setattr(t, "wz_innen_schlichten", 77), "nicht in der Werkzeugliste"),
+])
+def test_inner_errors(change, needle):
+    t = buchse()
+    change(t)
+    res = k.generate(t)
+    assert not res.ok and any(needle in e for e in res.errors), res.errors
+
+
+def test_inner_warnings_and_dimensions():
+    t = buchse()
+    t.tool(10).dm = 15.0
+    res = k.generate(t)
+    assert res.ok and any("Ø15" in w for w in res.warnings)
+    assert k.masse(buchse())["innen"] == [(0.0, -10, 10.0), (-10, -25, 15.0), (-25, -28.0, 3.0)]
+    assert k.masse(k.beispiel_teil())["innen"] == []
+
+
+def test_inner_data_survives_save_and_load():
+    t = buchse()
+    t2 = k.Teil.from_dict(json.loads(json.dumps(t.to_dict())))
+    assert [(p.x, p.z, p.ecke, p.wert) for p in t2.innen] == [(p.x, p.z, p.ecke, p.wert) for p in t.innen]
+    assert (t2.bohr_d, t2.bohr_tiefe, t2.wz_bohren, t2.wz_innen_schruppen) == (16.0, 28.0, 10, 3)
+    assert k.generate(t2).code == k.generate(t).code
+
+
+def test_old_files_get_inner_tools_where_free():
+    data = k.beispiel_teil().to_dict()
+    del data["innen"]
+    data["werkzeuge"] = [w for w in data["werkzeuge"] if w["t"] not in (4, 10)]
+    data["werkzeuge"][2] = dict(data["werkzeuge"][2], t=3, art="schruppen", name="MEIN T3")  # T3 belegt
+    t = k.Teil.from_dict(data)
+    assert t.tool(3).name == "MEIN T3"  # bleibt
+    assert t.tool(4).art == "innen" and (t.tool(10).art, t.tool(10).lage) == ("bohrer", "mitte")
+    # neue Dateien bleiben unverändert
+    t2 = k.Teil.from_dict(json.loads(json.dumps(t.to_dict())))
+    assert [w.t for w in t2.werkzeuge] == [w.t for w in t.werkzeuge]

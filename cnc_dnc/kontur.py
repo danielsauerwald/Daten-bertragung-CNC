@@ -45,11 +45,12 @@ FEATURES = {
 TOOL_ARTEN = {
     "schruppen": "Drehen schruppen",
     "schlichten": "Drehen schlichten",
+    "innen": "Bohrstange (innen)",
     "fraeser": "Fräser",
     "bohrer": "Bohrer",
     "fase": "Fasenfräser 90°",
 }
-LAGEN = {"": "–", "radial": "radial", "axial": "axial"}
+LAGEN = {"": "–", "radial": "radial", "axial": "axial", "mitte": "stehend (Drehmitte)"}
 # Welche Werkzeuglage eine Fräsung braucht
 FEATURE_LAGE = {"flaeche": "radial", "nut": "radial", "bohrung_radial": "radial", "bohrung_axial": "axial"}
 
@@ -76,7 +77,7 @@ class Werkzeug:
     d: int = 1
     name: str = ""
     art: str = "schruppen"
-    lage: str = ""  # bei angetriebenen Werkzeugen "radial" oder "axial"
+    lage: str = ""  # angetrieben "radial"/"axial"; stehender Bohrer in Drehmitte "mitte"
     dm: float = 0.0  # Durchmesser (Fräser, Bohrer, Fasenfräser)
     s: float = 2000.0  # Drehzahl
     f: float = 0.2  # Drehen mm/U, Fräsen/Bohren mm/min
@@ -135,6 +136,13 @@ class Teil:
     werkzeuge: List[Werkzeug] = field(default_factory=list)
     wz_schruppen: int = 1
     wz_schlichten: int = 2
+    # Innenbearbeitung: Vorbohren in der Mitte (stehender Bohrer), dann Bohrstange
+    innen: List[KPunkt] = field(default_factory=list)  # Innenkontur ab Stirnseite nach innen, leer = keine
+    bohr_d: float = 0.0  # Vorbohr-Ø
+    bohr_tiefe: float = 0.0  # Tiefe mit vollem Ø (ohne Spitze)
+    wz_bohren: int = 10
+    wz_innen_schruppen: int = 3
+    wz_innen_schlichten: int = 4
     aufmass_x: float = 0.4  # Schlichtaufmaß im Durchmesser
     aufmass_z: float = 0.1
     kante: float = 0.2  # „Entgraten“ an Drehkanten = Fase dieser Größe
@@ -158,7 +166,7 @@ class Teil:
         if not isinstance(data, dict):
             return base
         for f in fields(cls):
-            if f.name in ("punkte", "fraesungen", "werkzeuge") or f.name not in data:
+            if f.name in ("punkte", "fraesungen", "werkzeuge", "innen") or f.name not in data:
                 continue
             default = getattr(base, f.name)
             try:
@@ -167,11 +175,18 @@ class Teil:
                 continue
             setattr(base, f.name, value)
         base.punkte = [_load(KPunkt, p) for p in data.get("punkte", []) if isinstance(p, dict)] or base.punkte
+        base.innen = [_load(KPunkt, p) for p in data.get("innen", []) if isinstance(p, dict)]
         base.fraesungen = [_load(Fraesung, p) for p in data.get("fraesungen", []) if isinstance(p, dict)]
         base.werkzeuge = [_load(Werkzeug, p) for p in data.get("werkzeuge", []) if isinstance(p, dict)]
         for fr in base.fraesungen:
             fr.winkel = [float(w) for w in fr.winkel if isinstance(w, (int, float))] or [0.0]
         base.punkte[0].x, base.punkte[0].z = 0.0, 0.0
+        if "innen" not in data and base.werkzeuge:  # Datei von vor der Innenbearbeitung
+            used = {w.t for w in base.werkzeuge}
+            for w in standard_werkzeuge():  # Bohrer (Drehmitte) und Bohrstangen ergänzen, wo frei
+                if (w.art == "innen" or w.lage == "mitte") and w.t not in used:
+                    base.werkzeuge.append(w)
+                    used.add(w.t)
         return base
 
 
@@ -225,6 +240,9 @@ def standard_werkzeuge() -> List[Werkzeug]:
         Werkzeug(6, 1, "BOHRER D5", "bohrer", "radial", 5, 2500, 150, 5, "VHM-BOHRER D5"),
         Werkzeug(7, 1, "FASENFRAESER 90", "fase", "radial", 10, 4000, 400, 0, "FASENFRAESER D10 90"),
         Werkzeug(8, 1, "BOHRER D5", "bohrer", "axial", 5, 2500, 150, 5, "VHM-BOHRER D5"),
+        Werkzeug(3, 1, "DCMT04", "innen", "", 0, 1800, 0.15, 1.0, "A12M-SDUCR07", "DCMT 070204-M"),
+        Werkzeug(4, 1, "DCMT02", "innen", "", 0, 2200, 0.08, 0, "A12M-SDUCR07", "DCMT 070202-F"),
+        Werkzeug(10, 1, "BOHRER D16", "bohrer", "mitte", 16, 900, 0.12, 12, "HSS-BOHRER D16"),
     ]
 
 
@@ -252,7 +270,7 @@ def dreh_geometrie(w: Werkzeug):
     p = wk.parse_platte(w.platte) or wk.parse_platte(w.name)
     if p is None:
         guess = re.match(r"^\s*([CDVWTS])([A-Z])([A-Z])([A-Z])\s*0?(\d)", w.name.upper())
-        default = "VCMT 160404-F" if w.art == "schlichten" else "CNMG 120408-M"
+        default = {"schlichten": "VCMT 160404-F", "innen": "DCMT 070204-M"}.get(w.art, "CNMG 120408-M")
         if guess:
             form, frei = guess.group(1), guess.group(2)
             rad = guess.group(5)
@@ -264,12 +282,18 @@ def dreh_geometrie(w: Werkzeug):
         p = wk.parse_platte(default)
         notes.append("T{}: keine Platte angegeben – Simulation nimmt {}.".format(w.t, p.code))
     h = wk.halter(w.halter)
+    art = "innen" if w.art == "innen" else "aussen"
+    if h is not None and h.art != art:
+        notes.append("T{}: {} ist {} – hier wird {} gebraucht.".format(
+            w.t, h.code, "eine Bohrstange" if h.art == "innen" else "ein Außenhalter",
+            "eine Bohrstange" if art == "innen" else "ein Außenhalter"))
+        h = None
     if h is None or not wk.platte_passt(h, p):
         if h is not None:
             notes.append("T{}: Platte {} passt nicht in {}.".format(w.t, p.code, h.code))
-        cand = [x for x in wk.HALTER if x.art == "aussen" and x.hand == "R" and wk.platte_passt(x, p)]
+        cand = [x for x in wk.HALTER if x.art == art and x.hand == "R" and wk.platte_passt(x, p)]
         if not cand:
-            cand = [x for x in wk.HALTER if x.art == "aussen" and x.hand == "R" and x.form == p.form]
+            cand = [x for x in wk.HALTER if x.art == art and x.hand == "R" and x.form == p.form]
         if not cand:
             return None
         h = cand[0]
@@ -283,7 +307,8 @@ def masse(teil: Teil) -> Dict[str, Any]:
 
     ``kette``: Abschnitte zwischen den Z-Werten der Konturpunkte (Absätze haben keine Länge),
     ``gesamt``: Konturlänge ab Stirnseite (nur bei mehr als einem Abschnitt),
-    ``rohteil``: Rohteillänge ab Rohteil-Stirnseite (Planaufmaß) – None bei Stange.
+    ``rohteil``: Rohteillänge ab Rohteil-Stirnseite (Planaufmaß) – None bei Stange,
+    ``innen``: Abschnitte der Innenkontur und Bohrtiefe (ab Stirnseite).
     """
     zs: List[float] = []
     for p in teil.punkte:
@@ -296,7 +321,15 @@ def masse(teil: Teil) -> Dict[str, Any]:
     if teil.rohteil_l > TOL:
         front = max(0.0, teil.planaufmass)
         rohteil = (front, front - teil.rohteil_l, teil.rohteil_l)
-    return {"kette": kette, "gesamt": gesamt, "rohteil": rohteil}
+    zi: List[float] = []
+    for z in [p.z for p in teil.innen] + ([-teil.bohr_tiefe] if teil.bohr_d > TOL and teil.bohr_tiefe > TOL else []):
+        if not any(abs(z - v) < TOL for v in zi):
+            zi.append(z)
+    if teil.bohr_d > TOL and teil.bohr_tiefe > TOL and not any(abs(v) < TOL for v in zi):
+        zi.append(0.0)
+    zi.sort(reverse=True)
+    innen = [(a, b, a - b) for a, b in zip(zi, zi[1:])]
+    return {"kette": kette, "gesamt": gesamt, "rohteil": rohteil, "innen": innen}
 
 
 def neues_teil() -> Teil:
@@ -540,6 +573,97 @@ def build_geometry(teil: Teil) -> Geometrie:
     return g
 
 
+def build_innen(teil: Teil) -> Geometrie:
+    """Geometrie der Innenkontur (Bohrung). Leer, wenn keine Innenkontur eingegeben ist.
+
+    Die Kontur beginnt an der Stirnseite (Z0) und läuft nach innen; der Durchmesser darf dabei
+    nicht größer werden. Eine Fase/ein Radius am ersten Punkt ist die Kante am Bohrungseingang.
+    """
+    g = Geometrie()
+    pts = teil.innen
+    if not pts:
+        return g
+    if len(pts) < 2:
+        g.errors.append("Innenkontur: mindestens zwei Punkte (Bohrungsanfang an der Stirnseite und Ende).")
+        return g
+    if abs(pts[0].z) > TOL:
+        g.errors.append("Innenkontur: der erste Punkt liegt an der Stirnseite (Z0).")
+        return g
+    # gedachter Punkt auf der Stirnfläche über dem Bohrungsanfang -> Ecke am Eingang wie jede andere
+    zr = [(0.0, pts[0].x / 2.0 + 10.0)] + [(p.z, p.x / 2.0) for p in pts]
+    n = len(zr) - 1
+    dirs: List[Tuple[float, float, float]] = [(0.0, 0.0, 0.0)]
+    for i in range(1, n + 1):
+        dz, dr = zr[i][0] - zr[i - 1][0], zr[i][1] - zr[i - 1][1]
+        u = _unit(dz, dr)
+        dirs.append(u)
+        if i == 1:
+            continue
+        k = i - 1  # Punktnummer in teil.innen
+        if u[2] < TOL:
+            g.errors.append("Innenkontur: Punkt {} liegt auf Punkt {}.".format(k, k - 1))
+        elif dz > TOL or dr > TOL:
+            g.errors.append("Innenkontur Element {}: muss nach innen verlaufen, der Durchmesser darf nicht "
+                            "größer werden (Hinterschnitte gehen noch nicht).".format(k))
+    for k, p in enumerate(pts):
+        if p.x <= TOL:
+            g.errors.append("Innenkontur Punkt {}: Durchmesser fehlt.".format(k))
+        elif teil.bohr_d > 0 and p.x < teil.bohr_d - TOL:
+            g.errors.append("Innenkontur Punkt {}: Ø{} ist kleiner als die Vorbohrung Ø{}.".format(
+                k, fmt(p.x), fmt(teil.bohr_d)))
+    if g.errors:
+        return g
+    trims = [0.0] * (n + 1)
+    kinds: Dict[int, Tuple[str, float]] = {}
+    for i in range(1, n):
+        p = pts[i - 1]
+        if not p.ecke:
+            continue
+        value = teil.kante if p.ecke == "entgraten" else p.wert
+        if value <= TOL:
+            g.errors.append("Innenkontur Punkt {}: Größe für {} fehlt.".format(i - 1, ECKEN.get(p.ecke, p.ecke)))
+            continue
+        d1, d2 = dirs[i], dirs[i + 1]
+        cross = d1[0] * d2[1] - d1[1] * d2[0]
+        theta = math.atan2(abs(cross), d1[0] * d2[0] + d1[1] * d2[1])
+        if theta < math.radians(0.5):
+            continue
+        trims[i] = value * math.tan(theta / 2.0) if p.ecke == "radius" else value
+        kinds[i] = (p.ecke, value)
+    for i in range(2, n + 1):
+        if trims[i - 1] + trims[i] > dirs[i][2] + TOL:
+            g.errors.append("Innenkontur Element {}: Fase/Radius passt nicht auf die Länge {}.".format(
+                i - 1, fmt(dirs[i][2])))
+    if g.errors:
+        return g
+    for i in range(1, n + 1):
+        dz, dr, _ln = dirs[i]
+        z0, r0 = zr[i - 1]
+        z1, r1 = zr[i]
+        if i >= 2:
+            a = (z0 + dz * trims[i - 1], r0 + dr * trims[i - 1])
+            b = (z1 - dz * trims[i], r1 - dr * trims[i])
+            if math.hypot(b[0] - a[0], b[1] - a[1]) > EPS:
+                g.elems.append(Elem(a[0], a[1], b[0], b[1], seg=i - 1))
+        else:
+            b = (z1 - dz * trims[i], r1 - dr * trims[i])
+        if i in kinds:
+            kind, value = kinds[i]
+            d2 = dirs[i + 1]
+            c = (z1 + d2[0] * trims[i], r1 + d2[1] * trims[i])
+            if kind == "radius":
+                cross = dz * d2[1] - dr * d2[0]
+                ccw = cross > 0
+                nz, nr = (-dr, dz) if ccw else (dr, -dz)
+                g.elems.append(Elem(b[0], b[1], c[0], c[1], arc=True, ccw=ccw, radius=value,
+                                    cz=b[0] + nz * value, cr=b[1] + nr * value, corner=i - 1))
+            else:
+                g.elems.append(Elem(b[0], b[1], c[0], c[1], corner=i - 1))
+    g.first, g.last = 1, len(pts) - 1
+    g.turned = [True] * len(pts)
+    return g
+
+
 def polyline(elems: Sequence[Elem], max_deg: float = 5.0) -> List[Tuple[float, float]]:
     if not elems:
         return []
@@ -696,9 +820,13 @@ def _cross(pl: List[Tuple[float, float]], level: float) -> Tuple[float, int]:
     return pl[-1][0], len(pl)
 
 
-def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
+def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out, nach_schruppen=None,
+             nach_schlichten=None) -> None:
     elems = geom.turn_elems()
     if not elems:
+        for hook in (nach_schruppen, nach_schlichten):
+            if hook is not None and not res.errors:
+                hook()
         return
     rough = teil.tool(teil.wz_schruppen)
     fine = teil.tool(teil.wz_schlichten)
@@ -777,6 +905,10 @@ def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
                 out.move("G00", z=zs)
             r_prev = rk
         _retract(out)
+    if nach_schruppen is not None:
+        nach_schruppen()
+        if res.errors:
+            return
 
     # ---- Schlichten ----
     last = elems[-1]
@@ -792,6 +924,207 @@ def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
             out.move("G01", r=e.r1, z=e.z1)
     out.move("G01", r=max(R_s, last.r1) + 0.5)
     _retract(out, g40=True)
+    if nach_schlichten is not None:
+        nach_schlichten()
+
+
+# ---------------------------------------------------------------------------
+# Innenbearbeitung: Mitte bohren, Bohrstange schruppen/schlichten
+# ---------------------------------------------------------------------------
+
+
+def _bohren_aktiv(teil: Teil) -> bool:
+    return teil.bohr_d > TOL and teil.bohr_tiefe > TOL
+
+
+def _innen_pruefen(teil: Teil, geom: Geometrie, gin: Geometrie, res: Ergebnis) -> None:
+    from .werkzeugkatalog import rundwerkzeug
+
+    bohren = _bohren_aktiv(teil)
+    if not gin.elems and not bohren:
+        return
+    if not bohren:
+        res.errors.append("Innenkontur: bitte Vorbohren (Ø und Tiefe) angeben.")
+        return
+    if not gin.elems and _min_radius(teil, geom, -teil.bohr_tiefe, 0.0) - teil.bohr_d / 2 < 0.5:
+        res.errors.append("Vorbohren Ø{}: Wand zu dünn.".format(fmt(teil.bohr_d)))
+    drill = teil.tool(teil.wz_bohren)
+    if drill is None:
+        res.errors.append("Bohrer T{} (Vorbohren) steht nicht in der Werkzeugliste.".format(teil.wz_bohren))
+    elif drill.art != "bohrer" or drill.lage != "mitte":
+        res.errors.append("T{} zum Vorbohren muss ein Bohrer mit Lage „stehend (Drehmitte)“ sein.".format(drill.t))
+    else:
+        if drill.dm > 0 and abs(drill.dm - teil.bohr_d) > TOL:
+            res.warnings.append("Bohrer T{} hat Ø{}, Vorbohren ist mit Ø{} eingetragen.".format(
+                drill.t, fmt(drill.dm), fmt(teil.bohr_d)))
+        rw = rundwerkzeug(drill.halter)
+        if rw is not None and rw.schneidenlaenge + TOL < teil.bohr_tiefe:
+            res.errors.append("Bohrer {} (T{}) ist zu kurz: Schneidenlänge {} für {} mm Tiefe.".format(
+                rw.code, drill.t, fmt(rw.schneidenlaenge), fmt(teil.bohr_tiefe)))
+    if not gin.elems:
+        return
+    z_last = min(p.z for p in teil.innen)
+    if teil.bohr_tiefe < -z_last - TOL:
+        res.errors.append("Vorbohren {} tief reicht nicht – die Innenkontur geht bis Z{}.".format(
+            fmt(teil.bohr_tiefe), fmt(z_last)))
+    for k, p in enumerate(teil.innen):
+        aussen = _min_radius(teil, geom, p.z - 0.01, p.z + 0.01)
+        if aussen - p.x / 2 < 0.5:
+            res.errors.append("Innenkontur Punkt {}: Wand zu dünn (außen Ø{}, innen Ø{}).".format(
+                k, fmt(2 * aussen), fmt(p.x)))
+    tiefe = -z_last
+    for nr, was in ((teil.wz_innen_schruppen, "Schruppen"), (teil.wz_innen_schlichten, "Schlichten")):
+        w = teil.tool(nr)
+        if w is None:
+            res.errors.append("Bohrstange T{} (innen {}) steht nicht in der Werkzeugliste.".format(nr, was))
+            continue
+        if w.art != "innen":
+            res.errors.append("T{} (innen {}) ist keine Bohrstange.".format(nr, was))
+            continue
+        g = dreh_geometrie(w)
+        if g is None:
+            continue
+        h = g[0]
+        if h.dmin > teil.bohr_d + TOL:
+            res.errors.append("Bohrstange {} (T{}) braucht mindestens Ø{} – vorgebohrt ist nur Ø{}.".format(
+                h.code, w.t, fmt(h.dmin), fmt(teil.bohr_d)))
+        if h.laenge - 3 * h.b < tiefe:
+            res.errors.append("Bohrstange {} (T{}) ist zu kurz für {} mm Tiefe (Einspannung mind. 3×Ø).".format(
+                h.code, w.t, fmt(tiefe)))
+        elif tiefe > 4 * h.b:
+            res.warnings.append("Bohrstange {} (T{}): Auskragung {} mm > 4×Ø – Rattergefahr, Schnittwerte "
+                                "reduzieren oder stärkere Stange.".format(h.code, w.t, fmt(tiefe)))
+
+
+def _min_radius(teil: Teil, geom: Geometrie, z_lo: float, z_hi: float) -> float:
+    """Kleinster Außenradius des Fertigteils zwischen z_lo und z_hi (für die Wandstärke)."""
+    if not geom.elems:
+        return teil.rohteil_d / 2.0
+    best = float("inf")
+    pl = polyline(geom.elems, 2.0)
+    for (za, ra), (zb, rb) in zip(pl, pl[1:]):
+        lo, hi = min(za, zb), max(za, zb)
+        if hi < z_lo - EPS or lo > z_hi + EPS:
+            continue
+        if hi - lo < EPS:
+            best = min(best, max(ra, rb))  # Absatz: zählt der größere Durchmesser
+            continue
+        for z in (max(lo, z_lo), min(hi, z_hi)):
+            best = min(best, ra + (rb - ra) * (z - za) / (zb - za))
+    if best == float("inf"):
+        return teil.rohteil_d / 2.0
+    return best
+
+
+def _mitte_bohren(teil: Teil, res: Ergebnis, out: _Out) -> None:
+    from .werkzeugkatalog import rundwerkzeug
+
+    w = teil.tool(teil.wz_bohren)
+    if w is None:
+        return
+    s = max(0.5, teil.sicherheit)
+    rd = teil.bohr_d / 2
+    rw = rundwerkzeug(w.halter)
+    spitze = rw.spitzenwinkel if rw is not None else 118.0
+    z_tip = -(teil.bohr_tiefe + (rd / math.tan(math.radians(spitze / 2)) if spitze < 179 else 0.0))
+    front = max(0.0, teil.planaufmass)
+    _turn_head(out, "VORBOHREN", w)
+    out.move("G00", r=0.0, z=front + s)
+    depths = _steps(0.0, z_tip, w.ap if w.ap > TOL else -z_tip)
+    prev = None
+    for i, dv in enumerate(depths):
+        if i:
+            out.move("G00", z=front + s)
+            out.move("G00", z=prev + 0.5)
+        out.move("G01", z=dv, post="F" + out.pp.num(w.f) if i == 0 else "")
+        prev = dv
+    out.move("G00", z=front + s)
+    _retract(out)
+    res.arbeitsgaenge.append("Bohren Ø{} T{}".format(fmt(teil.bohr_d), w.t))
+
+
+def _innen_schruppen(teil: Teil, gin: Geometrie, res: Ergebnis, out: _Out) -> None:
+    w = teil.tool(teil.wz_innen_schruppen)
+    if w is None or not gin.elems:
+        return
+    if w.ap <= TOL:
+        res.errors.append("Bohrstange T{}: Zustellung fehlt.".format(w.t))
+        return
+    s = max(0.5, teil.sicherheit)
+    ax, az = max(0.0, teil.aufmass_x) / 2.0, max(0.0, teil.aufmass_z)
+    rd = teil.bohr_d / 2
+    zs = max(0.0, teil.planaufmass) + s
+    pl = [(z + az, r - ax) for z, r in polyline(gin.elems)]
+    if pl[-1][1] > rd - 0.5:  # Ende: senkrecht bis in die Vorbohrung (Absatz bzw. Boden)
+        pl.append((pl[-1][0], rd - 0.5))
+    r_high = max(r for _, r in pl)
+    if r_high - rd <= TOL:
+        return
+    n = int(math.ceil((r_high - rd) / w.ap - 1e-9))
+    levels = [rd + (r_high - rd) * k / n for k in range(1, n + 1)]
+    _turn_head(out, "INNEN VORDREHEN", w)
+    res.arbeitsgaenge.append("Innen vordrehen T{}".format(w.t))
+    out.move("G00", r=rd - 0.5, z=zs)
+    r_prev = rd
+    feed = False
+    for rk in levels:
+        z_end, j = None, len(pl)
+        for k in range(1, len(pl)):
+            (za, ra), (zb, rb) = pl[k - 1], pl[k]
+            if rb < rk - EPS:
+                t = 0.0 if ra - rb < EPS else min(1.0, max(0.0, (ra - rk) / (ra - rb)))
+                z_end, j = za + t * (zb - za), k
+                break
+        if z_end is None or z_end >= zs - TOL:
+            r_prev = rk
+            continue
+        out.move("G00", r=rk)
+        out.move("G01", z=z_end, post="" if feed else "F" + out.pp.num(w.f))
+        feed = True
+        cz, cr = z_end, rk
+        for m in range(j, len(pl)):
+            zb, rb = pl[m]
+            if rb <= r_prev + EPS:
+                if cr - rb > EPS:
+                    t = (cr - r_prev) / (cr - rb)
+                    cz, cr = cz + t * (zb - cz), r_prev
+                else:
+                    cz, cr = zb, rb
+                out.move("G01", r=cr, z=cz)
+                break
+            if abs(zb - cz) > EPS or abs(rb - cr) > EPS:
+                out.move("G01", r=rb, z=zb)
+            cz, cr = zb, rb
+        out.move("G01", r=cr - 0.5, z=cz + 0.5)
+        out.move("G00", z=zs)
+        r_prev = rk
+    _retract(out)
+
+
+def _innen_schlichten(teil: Teil, gin: Geometrie, res: Ergebnis, out: _Out) -> None:
+    w = teil.tool(teil.wz_innen_schlichten)
+    if w is None or not gin.elems:
+        return
+    pp = out.pp
+    s = max(0.5, teil.sicherheit)
+    rd = teil.bohr_d / 2
+    zs = max(0.0, teil.planaufmass) + s
+    elems = gin.elems
+    first, last = elems[0], elems[-1]
+    _turn_head(out, "INNEN FERTIGDREHEN", w)
+    res.arbeitsgaenge.append("Innen fertigdrehen T{}".format(w.t))
+    out.move("G00", r=first.r0, z=zs)
+    out.move("G01", z=first.z0, pre="G41", post="F" + pp.num(w.f))
+    for e in elems:
+        if e.arc:
+            out.move("G03" if e.ccw else "G02", r=e.r1, z=e.z1, post=pp.kreis + pp.num(e.radius), radius=e.radius)
+        else:
+            out.move("G01", r=e.r1, z=e.z1)
+    out.move("G01", r=min(last.r1, rd) - 0.5)  # Absatz/Boden bis in die Vorbohrung, weg von der Wand
+    out.lines.extend(pp.fill(pp.kuehl_aus))
+    out.move("G00", z=zs, pre="G40")  # erst aus der Bohrung heraus, dann zum Wechselpunkt
+    out.move("G00", r=pp.wechsel_x / 2.0)
+    out.move("G00", z=pp.wechsel_z)
 
 
 # ---------------------------------------------------------------------------
@@ -1341,7 +1674,7 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
                     nr, fmt(lo), fmt(stock_end)))
         if res.errors:
             return res
-    if not geom.first and not teil.fraesungen:
+    if not geom.first and not teil.fraesungen and not teil.innen and not _bohren_aktiv(teil):
         res.errors.append("Es ist nichts zu bearbeiten: alle Elemente stehen auf „Nicht drehen“ und es gibt "
                           "keine Fräsung.")
         return res
@@ -1356,9 +1689,26 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
             fmt(pp.wechsel_z)))
     if res.errors:
         return res
+    gin = build_innen(teil)
+    res.errors.extend(gin.errors)
+    if not res.errors:
+        _innen_pruefen(teil, geom, gin, res)
+    if res.errors:
+        return res
     out = _Out(pp)
     out.start = (pp.wechsel_z, pp.wechsel_x / 2.0)
-    _turning(teil, geom, res, out)
+
+    def innen_vor() -> None:
+        if _bohren_aktiv(teil):
+            _mitte_bohren(teil, res, out)
+        if gin.elems:
+            _innen_schruppen(teil, gin, res, out)
+
+    def innen_fertig() -> None:
+        if gin.elems:
+            _innen_schlichten(teil, gin, res, out)
+
+    _turning(teil, geom, res, out, innen_vor, innen_fertig)
     _milling(teil, geom, res, out)
     if res.errors:
         return res

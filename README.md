@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.11
+# CNC-Datenübertragung 2.12
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -44,6 +44,16 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
 - **Kontur → Code**: Teil mit Maßen eingeben, in der Zeichnung antippen, ob gedreht, gefräst
   oder entgratet wird – auch Flächen, Nuten und Bohrungen auf Winkellagen (C-/Y-Achse).
   Heraus kommt ein fertiges Programm, siehe [Kontur → Code](#kontur--code).
+- **Innenbearbeitung**: Vorbohren in Drehmitte, Bohrung mit der Bohrstange schruppen und schlichten
+  (G41), Fase/Radius am Bohrungseingang, siehe [Innenbearbeitung](#innenbearbeitung-bohrung).
+- **Werkzeugkatalog**: 52 Wendeschneidplatten (CNMG, CCMT, DNMG, DCMT, VNMG, VCMT, WNMG …),
+  32 Außenhalter, 23 Bohrstangen von Ø8 bis Ø40 sowie Bohrer und Fräser – mit ISO-Bezeichnung,
+  siehe [Werkzeuge](#werkzeuge-aus-dem-katalog).
+- **Simulation** mit echter Plattenform: Drehen außen und innen (Platte, Halter, Bohrstange) und
+  Fräsen auf den Winkellagen; meldet Kollisionen, Eilgang ins Material und Restmaterial,
+  siehe [Simulation](#simulation).
+- **Frässtrategien**: Flächen zickzack/Gleichlauf/Gegenlauf, Nuten in Bahnen, mit Rampe oder
+  trochoidal, Bohrungen mit Entspanen/Spanbruch.
 - **Fenster passen auf jeden Windows-Bildschirm**: Kontur-Assistent und Dialoge richten sich nach
   dem freien Bereich über der Taskleiste (auch bei 125 %/150 % Skalierung); die Tasten unten
   bleiben immer sichtbar.
@@ -311,6 +321,8 @@ aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
    Konturabschnitte, die **Gesamtlänge** der Kontur und die **Rohteil-Länge**. Die Punktliste zeigt
    die Länge jedes Abschnitts ebenfalls. Ist die Kontur länger als das Rohteil, meldet der
    Assistent das.
+
+   Bohrung im Teil? → Reiter **„Innen“**, siehe [Innenbearbeitung](#innenbearbeitung-bohrung).
 2. **In der Zeichnung antippen:**
    - **Element** (Linie): **Drehen** oder **Nicht drehen**. Unter „Fräsen hier“ legt man direkt
      eine Fläche, Nut oder Bohrung an dieser Stelle an (Z-Bereich wird übernommen).
@@ -330,10 +342,21 @@ aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
    **2× / 3× / 4× / 6×** gleichmäßig. Die **Stirnansicht** rechts in der Zeichnung zeigt die
    Lagen (0° oben). „Kanten entgraten“ fährt danach mit einem 90°-Fasenfräser die Kanten der
    Fläche/Nut ab bzw. senkt die Bohrungen an.
+   Im Fenster einer Fräsung wählt man auch die **Strategie**:
+
+   | Fräsung | Strategien |
+   |---|---|
+   | Fläche | Zickzack (hin und her), nur Gleichlauf, nur Gegenlauf |
+   | Nut | in Bahnen (Mitte, dann Seiten), mit Rampe eintauchen (3°), trochoidal (Wirbelfräsen) |
+   | Bohrung | Entspanen (ganz raus), Spanbruch (kurz zurück), in einem Zug |
 4. **Reiter „Werkzeuge“**: Revolverbelegung mit T-Nummer, Bezeichnung (kommt in den Kommentar),
-   Art, Lage (radial/axial), Ø, Drehzahl, Vorschub und Zustellung.
-5. **Reiter „Code“**: fertiges Programm und die Werkzeugbahn in der Zeichnung (gestrichelt
-   Eilgang, durchgezogen Vorschub). Dann **Als neues Programm** (mit Programmanfang und -ende,
+   Art, Lage, Halter und Platte bzw. Bohrer/Fräser aus dem [Katalog](#werkzeuge-aus-dem-katalog),
+   Ø, Drehzahl, Vorschub und Zustellung.
+5. **Reiter „Maschine“**: Maschine wählen, ihr [Postprozessor](#postprozessor-pro-maschine),
+   Sicherheitsabstand.
+6. **Reiter „Code“**: fertiges Programm und die Werkzeugbahn in der Zeichnung (gestrichelt
+   Eilgang, durchgezogen Vorschub). **▶ Simulation …** spielt das Programm mit Plattenform ab
+   (siehe [Simulation](#simulation)). Dann **Als neues Programm** (mit Programmanfang und -ende,
    z. B. `%_N_…_MPF` … `M30`) oder
    **Am Cursor einfügen**, z. B. in ein vorhandenes KANAL1-Programm. Speichern und Senden wie gewohnt.
 
@@ -380,11 +403,100 @@ SPOS=DC(180)
 
 Die Eingaben zum Teil werden gemerkt (`kontur.json` neben der `config.json`).
 
+### Innenbearbeitung (Bohrung)
+
+![Reiter „Innen“: Bohrung Ø24/Ø20 in einer Buchse, vorgebohrt Ø16](docs/kontur_innen.png)
+
+1. **Vorbohren Ø** und **Bohrtiefe** eintragen (Tiefe mit vollem Durchmesser, die Bohrerspitze rechnet
+   das Programm dazu). Nur bohren ohne Innenkontur geht auch.
+2. Die **Innenkontur** wie außen eingeben, aber von der Stirnseite **nach innen**: **+ Absatz …**
+   mit Ø und Länge, z. B. Ø24 × 10, dann Ø20 × 15, zum Schluss Ø16 mit Länge 0 (Bohrungsgrund bis auf
+   die Vorbohrung). Der Durchmesser wird nach innen kleiner oder bleibt gleich.
+3. In der Zeichnung die **Ecken** antippen (Punkte `i0`, `i1` …): Fase oder Radius. `i0` ist die
+   Kante am Bohrungseingang. Die Bohrung erscheint weiß im Schnitt, die Vorbohrung gestrichelt,
+   unter dem Teil eine eigene Maßkette „innen“.
+4. **Werkzeuge innen**: Bohrer mit Lage „stehend (Drehmitte)“ (Standard: T10 Ø16) und zwei
+   Bohrstangen (Standard: T3 A12M-SDUCR07 mit DCMT 070204-M zum Schruppen, T4 mit DCMT 070202-F
+   zum Schlichten).
+
+Reihenfolge im Programm: Vordrehen außen → Vorbohren → Innen vordrehen → Fertigdrehen außen →
+Innen fertigdrehen → Fräsen. Die Bohrstange stellt von der Vorbohrung aus nach außen zu, zieht
+jede Stufe an der Kontur nach und fährt immer erst in Z aus der Bohrung, dann in X zum Wechselpunkt:
+
+```
+;VORBOHREN BOHRER D16
+T10D1 G95 G18 S900 M3 M8
+G00 X0 Z2.5
+G01 Z-10.936 F0.12
+G00 Z2.5
+G00 Z-10.436
+…
+;INNEN FERTIGDREHEN DCMT02
+T04D1 G95 G18 S2200 M3 M8
+G00 X25 Z2.5
+G41 G01 Z0 F0.08
+G01 X24 Z-0.5
+G01 Z-9.6
+G03 X23.2 Z-10 CR=0.4
+G01 X20
+G01 Z-25
+G01 X16
+G01 X15
+G40 G00 Z2.5
+G00 X150
+G00 Z130
+```
+
+### Werkzeuge aus dem Katalog
+
+Im Reiter „Werkzeuge“ wählt man **Halter und Platte** (Drehen) bzw. **Bohrstange und Platte**
+(innen) oder **Bohrer/Fräser** aus einem Katalog. Die Platte passt immer zum Halter (Form, Größe,
+Freiwinkel); die Bezeichnung (z. B. `DCMT04`) wird vorgeschlagen und steht später im Kommentar.
+
+![Werkzeug: Bohrstange A16R-SCLCR09 mit CCMT 09T304-M](docs/werkzeug_bohrstange.png)
+
+| Katalog | Auswahl |
+|---|---|
+| Wendeschneidplatten (ISO 1832) | CNMG, CCMT, CCGT, DNMG, DCMT, DCGT, VNMG, VCMT, VCGT, VBMT, WNMG, TNMG, TCMT, SNMG, SCMT, RCMT in üblichen Größen und Eckenradien 0,2 … 1,2 |
+| Außenhalter (ISO 5608) | PCLNR/L 95°, PDJNR/L 93°, PDNNN/PDNNR 63°, PVJNR 93°, PWLNR 95°, PTGNR 91°, PSBNR 75°, PSSNR 45°, SVJBR/SVJCR 93°, SVHBR 107,5°, SVVBN 72,5°, SDJCR, SCLCR, STGCR, SRDCN – Schaft 16 bis 32 mm |
+| Bohrstangen (ISO 6261) | A08H … A25T (Stahl mit Kühlung) und S20S … S40T: SCLCR, SDUCR, SVUCR, SVUBR, PCLNR, PDUNR, PTFNR, PWLNR – ab Bohrung Ø10 bis Ø50 |
+| Bohrer, Fräser | VHM-Bohrer Ø3 … Ø14, HSS-Bohrer Ø16 … Ø25, Wendeplattenbohrer Ø16 … Ø32, NC-Anbohrer, VHM-Fräser Ø3 … Ø20, Fasenfräser 90° |
+
+Die Bohrstangen haben die **kleinste Bohrung (Dmin)** und den **Abstand Achse–Schneidenecke (f1)**
+hinterlegt. Der Assistent prüft damit, ob die Stange in die Vorbohrung passt; die Simulation
+prüft die Stange auf beiden Seiten der Achse gegen die Bohrungswand.
+
+> Dmin, f1 und Längen sind Richtwerte aus Herstellerkatalogen (Sandvik, Walter, Kennametal,
+> Tungaloy, Pramet, ZCC-CT, Phantom). Je nach Hersteller weichen sie um 1–2 mm ab – bei knappen
+> Bohrungen das Datenblatt der eigenen Stange prüfen.
+
+### Simulation
+
+**▶ Simulation …** spielt das Programm im Schnitt durch die Drehachse ab – mit der echten Form
+von Platte, Halter und Bohrstange (aus dem Katalog) bzw. des Bohrers. Abspielen, Schritt für Schritt,
+Tempo, Lupe; die aktive NC-Zeile ist markiert. Mit G41/G42 fährt der Schneidenradius die versetzte
+Bahn wie an der Steuerung.
+
+![Simulation: Bohrstange beim Innen-Vordrehen](docs/simulation_innen.png)
+
+Gemeldet werden (antippen = an die Stelle springen):
+
+- **Eilgang ins Material**, Platte schneidet in die **Fertigkontur** (außen und innen)
+- **Halter stößt an**, **Bohrstange stößt an die Bohrungswand** (oben oder unterhalb der Achse),
+  Bohrstange fährt ins volle Material (Vorbohren vergessen)
+- **Restmaterial** außen und in der Bohrung; Innenecken, die mit dem Eckenradius der Platte gerundet
+  bleiben, als Hinweis
+
+Danach folgt das **Fräsen**: links der Querschnitt (Stirnansicht), rechts die Draufsicht der
+jeweiligen Winkellage mit Tiefe als Farbe – hier eine Nut trochoidal:
+
+![Simulation Fräsen: Nut trochoidal](docs/simulation_fraesen.png)
+
 ### Postprozessor (pro Maschine)
 
 Welche G- und M-Befehle im Programm stehen, legt der **Postprozessor der Maschine** fest. Jede
 Maschine in der Maschinenliste hat ihren eigenen: **⚙ Maschinen → Bearbeiten → Reiter
-„Postprozessor“** oder im Kontur-Assistenten im Reiter **„Postprozessor“** (dort wählt man auch die
+„Postprozessor“** oder im Kontur-Assistenten im Reiter **„Maschine“** (dort wählt man auch die
 Maschine). Rechts zeigt eine Vorschau sofort, wie der Code damit aussieht.
 
 ![Postprozessor Siemens mit S4/M4=](docs/postprozessor.png)
@@ -449,10 +561,13 @@ Der Assistent erzeugt lieber keinen Code als einen gefährlichen. Er meldet z. B
 - Fräser zu groß für Fläche oder Nut, falsches Werkzeug (z. B. axialer Bohrer für eine Querbohrung)
 - Entgraten direkt neben einem größeren Absatz (der Kegel des Fasenfräsers käme dagegen)
 - Querbohrung, die einen Absatz anschneidet, oder Stirnbohrung hinter einem größeren Durchmesser
+- Innen: Bohrstange passt nicht in die Vorbohrung (Dmin), Bohrstange zu kurz bzw. Auskragung über 4×Ø,
+  Vorbohrung zu flach oder kleiner als die Innenkontur, Wand zu dünn, Bohrer zu kurz,
+  Innenkontur wird nach innen größer
 
 ### Grenzen
 
-Noch nicht enthalten: Heidenhain, Einstiche, Innenbearbeitung,
+Noch nicht enthalten: Heidenhain, Einstiche und Hinterschnitte (außen und innen), Gewinde,
 Bahnen mit TRANSMIT/TRACYL. Die Ecken einer Nut haben den Fräserradius; die Kanten an der
 Stirnseite einer offenen Nut werden nicht entgratet.
 
