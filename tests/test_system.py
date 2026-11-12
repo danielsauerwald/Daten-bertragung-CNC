@@ -112,8 +112,12 @@ def test_fit_window_respects_taskbar_and_title_bar():
     assert (w, h) == (400, 300) and x + w + 16 <= 1366 and y + h + 39 <= 728
 
 
-def test_work_area_fallback_without_windows():
+def test_work_area_fallback_without_windows(monkeypatch):
     from cnc_dnc import system
+
+    # Ersatzweg ohne Windows-API prüfen – auch auf dem Windows-Rechner der EXE-Erstellung,
+    # sonst liefert Windows dort den echten Bildschirm des Build-Rechners (z. B. 1024 breit).
+    monkeypatch.setattr(system, "IS_WIN", False)
 
     class Fake:
         def winfo_screenwidth(self):
