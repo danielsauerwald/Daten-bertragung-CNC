@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.14
+# CNC-Datenübertragung 2.15
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -46,6 +46,12 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
   Heraus kommt ein fertiges Programm, siehe [Kontur → Code](#kontur--code).
 - **Innenbearbeitung**: Vorbohren in Drehmitte, Bohrung mit der Bohrstange schruppen und schlichten
   (G41), Fase/Radius am Bohrungseingang, siehe [Innenbearbeitung](#innenbearbeitung-bohrung).
+- **3D-Modell laden (STEP/STL)**: Modell im Kontur-Assistenten öffnen, Drehachse (X0) und Nullpunkt
+  Z0 per Klick wählen – Kontur, Fasen/Radien, Bohrung, Schlüsselflächen und Querbohrungen werden
+  erkannt und übernommen, siehe [3D-Modell laden](#3d-modell-laden-stepstl).
+- **Mantelnut**: Nut auf der Mantelfläche rundherum (Ringnut), schräg/als Wendel oder als Kurvenbahn –
+  die C-Achse interpoliert mit X/Z (Siemens `TRACYL`, Fanuc `G07.1`).
+- **Nullpunkt Z0 frei wählbar**: „Z0 hinter Stirn“ verschiebt alle Z-Werte im Programm.
 - **Werkzeugkatalog**: 52 Wendeschneidplatten (CNMG, CCMT, DNMG, DCMT, VNMG, VCMT, WNMG …),
   32 Außenhalter, 23 Bohrstangen von Ø8 bis Ø40 sowie Bohrer und Fräser – mit ISO-Bezeichnung,
   siehe [Werkzeuge](#werkzeuge-aus-dem-katalog).
@@ -348,6 +354,7 @@ aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
    | Längsnut | Fräser, radial (Y-Achse) | Z rechts/links, Breite, Tiefe |
    | Bohrung radial | Bohrer, radial | Z, Ø, Tiefe |
    | Bohrung Stirnseite | Bohrer, axial | Lochkreis-Ø, Ø, Tiefe |
+   | Mantelnut (C-Achse) | Fräser, radial, TRACYL/G07.1 | Bahn: umlaufend, von–bis (Z/C, auch über 360°) oder Punkte; Breite, Tiefe |
 
    Die **Winkel C** trägt man einfach ein (`0 180`, `0 120 240`) oder verteilt sie mit
    **2× / 3× / 4× / 6×** gleichmäßig. Die **Stirnansicht** rechts in der Zeichnung zeigt die
@@ -362,6 +369,7 @@ aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
    | Fläche | Zickzack (hin und her), nur Gleichlauf, nur Gegenlauf |
    | Nut | in Bahnen (Mitte, dann Seiten), mit Rampe eintauchen (3°), trochoidal (Wirbelfräsen) |
    | Bohrung | Entspanen (ganz raus), Spanbruch (kurz zurück), in einem Zug |
+   | Mantelnut | schräg eintauchen (Wendel / Pendeln), senkrecht eintauchen |
 4. **Reiter „Werkzeuge“**: Revolverbelegung mit T-Nummer, Bezeichnung (kommt in den Kommentar),
    Art, Lage, Halter und Platte bzw. Bohrer/Fräser aus dem [Katalog](#werkzeuge-aus-dem-katalog),
    Ø, Drehzahl, Vorschub und Zustellung.
@@ -374,6 +382,31 @@ aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
    **Am Cursor einfügen**, z. B. in ein vorhandenes KANAL1-Programm. Speichern und Senden wie gewohnt.
 
 ![Code und Werkzeugbahn](docs/kontur_code.png)
+
+### 3D-Modell laden (STEP/STL)
+
+Im Kontur-Assistenten oben **3D-Modell …** und die Datei wählen. **STL** (ASCII oder binär) geht
+überall, auch auf dem Toughbook; **STEP/STP** liest die **PC-Version** (mit Open CASCADE) – dort
+werden Flächen genau erkannt, auch Querbohrungen.
+
+![3D-Modell: Drehachse und Nullpunkt wählen](docs/3d_modell.png)
+
+- **3D-Bild**: ziehen = drehen, Mausrad = zoomen, rechte Taste = schieben; Ansicht 3D/Seite/Stirn.
+- **Drehachse = X0**: vorgeschlagen wird die beste Achse (STEP: genau aus den Zylinderflächen).
+  Andere Achse aus der Liste oder „Achse: runde Fläche anklicken“. **Teil wenden** legt die andere
+  Stirnseite nach vorn.
+- **Nullpunkt Z0**: Klick in die Seitenansicht oder auf eine Planfläche im 3D-Bild (rastet auf
+  Planflächen ein) oder Wert eintragen. Liegt Z0 hinter der Stirnseite, steht die Stirnseite im
+  Programm z. B. bei `Z15`; alle Z-Werte werden verschoben, gezeichnet wird weiter ab der Stirnseite.
+- **Erkannt** (Liste rechts, blau in der Seitenansicht): Außenkontur mit Fasen und Radien, Rohteil,
+  Bohrung/Vorbohren bzw. Innenkontur, Schlüsselflächen, Bohrungen radial und an der Stirnseite.
+  Hinweise nennen, was nicht übernommen wird (Einstiche, Rückseite = 2. Aufspannung).
+- **Übernehmen** ersetzt Kontur und Fräsungen des Teils; Werkzeuge und Postprozessor bleiben. Danach
+  alles prüfen, ggf. anpassen und den Code erzeugen.
+
+![Nach dem Übernehmen: Z0 15 mm hinter der Stirnseite](docs/3d_modell_kontur.png)
+
+Das Feld **„Z0 hinter Stirn“** im Reiter „Kontur“ gibt es auch ohne Modell (`0` = Stirnseite).
 
 ### Was erzeugt wird
 
@@ -440,6 +473,12 @@ C wird vor dem Einschalten positioniert, im Zylinderbetrieb gibt es nur `G01` (F
 `G00`), erst ausschalten, dann frei fahren. Die gerade Kante einer Fläche an der Stirnseite folgt danach
 mit stehender Spindel und Y-Achse. Hat eine Maschine keine Zylinder-Interpolation, nimmt man im
 Postprozessor (Reiter „Mantel“) den Haken weg – dann wird wie früher mit X/Y/Z entgratet.
+
+**Mantelnut**: C positionieren, Zylinder-Interpolation ein, schräg (Wendel/Pendeln) oder senkrecht
+eintauchen, die Bahn abfahren (Bögen in höchstens 90°-Stücken), bei breiten Nuten mehrere Bahnen
+nebeneinander, aus, frei fahren. Die Simulation zeigt die Abwicklung des Mantels.
+
+![Simulation einer Mantelnut](docs/simulation_mantelnut.png)
 
 Die Eingaben zum Teil werden gemerkt (`kontur.json` neben der `config.json`).
 
@@ -653,8 +692,9 @@ Der Assistent erzeugt lieber keinen Code als einen gefährlichen. Er meldet z. B
 ### Grenzen
 
 Noch nicht enthalten: Heidenhain, Einstiche und Hinterschnitte (außen und innen), Gewinde,
-TRANSMIT an der Stirnseite. Nuten selbst werden mit der Y-Achse gefräst (parallele Wände), nur das
-Entgraten auf dem Mantel läuft mit TRACYL/G07.1. Die Ecken einer Nut haben den Fräserradius; die Kanten
+TRANSMIT an der Stirnseite. Längsnuten werden mit der Y-Achse gefräst (parallele Wände); Mantelnut und
+Entgraten auf dem Mantel laufen mit TRACYL/G07.1. Aus 3D-Modellen werden Einstiche und die Rückseite
+(2. Aufspannung) nicht übernommen; Querbohrungen nur aus STEP. Die Ecken einer Nut haben den Fräserradius; die Kanten
 an der Stirnseite einer offenen Nut werden nicht entgratet. Die Simulation zeigt den Fasenfräser beim
 Mantel-Entgraten vereinfacht (Achse parallel zur Winkellage statt radial gekippt).
 

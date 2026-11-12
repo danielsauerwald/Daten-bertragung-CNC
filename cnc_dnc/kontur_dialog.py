@@ -44,6 +44,7 @@ from .theme import C, MONO_FAMILY, Fonts, px
 FEAT_COLOR = "#7A3EB1"
 SEL_COLOR = "#F08C00"
 PATH_G0 = "#D9480F"
+Z0_COLOR = "#E8590C"  # Programm-Nullpunkt
 PATH_G1 = "#0E8A5B"
 
 
@@ -445,6 +446,8 @@ class KonturDialog(Dialog):
         ttk.Button(head, text="Beispiel", style="Small.TButton", command=self.load_example).pack(side="right")
         ttk.Button(head, text="Neu …", style="Small.TButton", command=self.new_part).pack(
             side="right", padx=(0, px(self, 8)))
+        ttk.Button(head, text="3D-Modell …", style="Small.TButton", command=self.load_model).pack(
+            side="right", padx=(0, px(self, 8)))
 
     def _build_canvas(self, main: tk.Frame) -> None:
         left = tk.Frame(main, bg=C["bg"])
@@ -555,6 +558,9 @@ class KonturDialog(Dialog):
         self._field(top, "rohteil_l", "Rohteil L", 6, col=2, row=1)
         tk.Label(top, text="Rohteil L = Länge inkl. Planaufmaß, 0 = Stange", bg=C["surface"], fg=C["muted"],
                  font=self.fonts.small).grid(row=2, column=0, columnspan=4, sticky="w")
+        self._field(top, "z_null", "Z0 hinter Stirn", 6, col=0, row=3)
+        tk.Label(top, text="0 = Nullpunkt an der Stirnseite", bg=C["surface"], fg=C["muted"],
+                 font=self.fonts.small).grid(row=3, column=2, columnspan=2, sticky="w")
         self.pt_tree = self._tree(f, [("nr", "Nr", 34), ("x", "X (Ø)", 60), ("z", "Z", 60), ("l", "Länge", 62),
                                       ("op", "Bearbeitung", 108), ("ecke", "Ecke", 96)], height=5)
         self.pt_tree.bind("<<TreeviewSelect>>", self._pt_selected)
@@ -956,6 +962,36 @@ class KonturDialog(Dialog):
                                "Postprozessor bleiben.", yes="Neu"):
             return
         self._replace_part(neues_teil(), keep_tools=True)
+
+    _cad_ordner = ""
+
+    def load_model(self, pfad: str = "") -> None:
+        """3D-Modell (STEP/STL) laden, Drehachse und Nullpunkt wählen, als Teil übernehmen."""
+        import os
+
+        from . import cad_dialog
+
+        if not pfad:
+            from tkinter import filedialog
+
+            pfad = filedialog.askopenfilename(parent=self, title="3D-Modell laden",
+                                              filetypes=cad_dialog.dateitypen(),
+                                              initialdir=KonturDialog._cad_ordner or None)
+            if not pfad:
+                return
+        KonturDialog._cad_ordner = os.path.dirname(pfad)
+        modell = cad_dialog.modell_laden(self, self.fonts, pfad)
+        if modell is None:
+            return
+        teil = cad_dialog.CadDialog(self, self.fonts, modell, self.teil, os.path.basename(pfad)).show()
+        if teil is None:
+            return
+        if len(self.teil.punkte) > 1 and not dialogs.confirm(
+                self, self.fonts, "3D-Modell übernehmen", "Kontur, Bohrung und Fräsungen des aktuellen Teils "
+                "werden durch das Modell ersetzt. Werkzeuge und Postprozessor bleiben.", yes="Übernehmen"):
+            return
+        self._replace_part(teil, keep_tools=False)
+        self._set_msg("3D-Modell übernommen – bitte alles prüfen.", "ok")
 
     def load_example(self) -> None:
         if len(self.teil.punkte) > 1 and not dialogs.confirm(
@@ -1641,6 +1677,18 @@ class KonturDialog(Dialog):
                            tags=("corner{}".format(i),))
         if gin is not None:
             self._draw_inner(gin, P, s)
+        # Programm-Nullpunkt, wenn er nicht an der Stirnseite liegt
+        if abs(t.z_null) > 1e-9:
+            xz, yz = P(-t.z_null, 0)
+            rz = px(self, 7)
+            cv.create_line(xz, cy - R * s - px(self, 8), xz, cy + R * s + px(self, 8), fill=Z0_COLOR, width=2,
+                           dash=(10, 3, 2, 3))
+            cv.create_oval(xz - rz, yz - rz, xz + rz, yz + rz, outline=C["text"], width=2, fill=C["surface"])
+            for start in (0, 180):
+                cv.create_arc(xz - rz, yz - rz, xz + rz, yz + rz, start=start, extent=90, fill=C["text"],
+                              outline="")
+            cv.create_text(xz, cy - R * s - px(self, 10), text="Z0 Programm (Stirnseite Z{})".format(
+                fmt(t.z_null)), anchor="s", fill=Z0_COLOR, font=f.small_bold)
         # Legende
         lx, ly = px(self, 10), H - px(self, 10)
         for color, text in ((C["primary"], "drehen"), (C["faint"], "nicht drehen"), (C["warn"], "entgraten"),

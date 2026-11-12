@@ -1,7 +1,7 @@
 @echo off
 REM ---------------------------------------------------------------------------
 REM  Baut dist\CNC-Datenuebertragung-PC.exe fuer Windows 10/11 (64 Bit)
-REM  mit "Bilder lesen" (M-/G-Code-Listen, Zyklen) – braucht Python 3.12.
+REM  mit "Bilder lesen" (M-/G-Code-Listen, Zyklen) und STEP-Modellen – braucht Python 3.12.
 REM  Fuer das Toughbook mit Windows 7 weiterhin build_exe.bat benutzen.
 REM ---------------------------------------------------------------------------
 setlocal
@@ -14,10 +14,11 @@ echo Verwende: %PY%
 %PY% --version || goto :error
 %PY% -m pip install --upgrade pip
 %PY% -m pip install -r requirements-pc.txt || goto :error
-%PY% -m pytest -q tests\test_textutil.py tests\test_ki.py || goto :error
+%PY% -m pytest -q tests\test_textutil.py tests\test_ki.py tests\test_cad.py || goto :error
 %PY% -m PyInstaller --noconfirm --clean --onefile --windowed ^
     --name CNC-Datenuebertragung-PC --icon assets\app.ico ^
-    --collect-submodules anthropic ^
+    --collect-submodules anthropic --collect-all cascadio ^
+    --add-data "cnc_dnc\daten\beispiel_welle.step;cnc_dnc\daten" ^
     CNC-Datenuebertragung.pyw || goto :error
 
 echo.

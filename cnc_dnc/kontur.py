@@ -152,6 +152,9 @@ class Teil:
     aufmass_z: float = 0.1
     kante: float = 0.2  # „Entgraten“ an Drehkanten = Fase dieser Größe
     sicherheit: float = 2.0
+    # Nullpunkt: so weit liegt Z0 des Programms hinter der Stirnseite (z. B. an einem Absatz, aus dem 3D-Modell
+    # gewählt). Gerechnet und gezeichnet wird ab der Stirnseite; im Code steht Z + z_null.
+    z_null: float = 0.0
     # Werkzeugwechselpunkt, M-/G-Befehle usw. stehen im Postprozessor der Maschine (postpro.py)
 
     def tool(self, t: int) -> Optional[Werkzeug]:
@@ -2083,6 +2086,18 @@ def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
             FEATURES.get(fr.art, fr.art), " entgraten" if deburr else "", w.t, winkel))
 
 
+_Z_WORT = re.compile(r"(?<![A-Z_])Z(-?\d+(?:\.\d*)?)")
+
+
+def _z_verschieben(line: str, dz: float, pp: Postprozessor) -> str:
+    """Z-Wörter einer Programmzeile um dz verschieben (Nullpunkt nicht an der Stirnseite). Kommentare
+    bleiben; der Werkzeugwechselpunkt wandert mit (gleicher Abstand zur Stirnseite wie eingestellt)."""
+    s = line.strip()
+    if not s or s.startswith(";") or s.startswith("("):
+        return line
+    return _Z_WORT.sub(lambda m: "Z" + pp.num(float(m.group(1)) + dz), line)
+
+
 def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = None,
              maschine: str = "") -> Ergebnis:
     """Ganzes Programm erzeugen.
@@ -2164,11 +2179,17 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
         head.append(pp.comment("MASCHINE {}".format(maschine)))
     roh = "D{} L{}".format(fmt(teil.rohteil_d), fmt(teil.rohteil_l)) if teil.rohteil_l > TOL else \
         "D{}".format(fmt(teil.rohteil_d))
-    head += [pp.comment("ROHTEIL {} NULLPUNKT MITTE STIRNSEITE Z0".format(roh)),
+    if abs(teil.z_null) > TOL:
+        null = "NULLPUNKT MITTE, STIRNSEITE BEI Z{}".format(fmt(teil.z_null))
+    else:
+        null = "NULLPUNKT MITTE STIRNSEITE Z0"
+    head += [pp.comment("ROHTEIL {} {}".format(roh, null)),
              pp.comment("VOR DEM ERSTEN LAUF SIMULIEREN UND PRUEFEN")]
     if rahmen:
         head += pp.fill(pp.start)
     body = list(out.lines)
+    if abs(teil.z_null) > TOL:
+        body = [_z_verschieben(ln, teil.z_null, pp) for ln in body]
     for mv in out.moves:
         mv.line += len(head)
     for op in res.fraes_ops:

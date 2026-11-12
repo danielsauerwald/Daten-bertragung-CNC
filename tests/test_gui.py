@@ -1271,3 +1271,83 @@ def test_mantel_groove_dialog_modes(app):
     vorgabe = k._default_feature("mantelnut", 4)
     assert vorgabe.bahn == [[-22.5, 0.0], [-22.5, 360.0]]
     k.destroy()
+
+
+def test_cad_dialog_zero_point_and_import(app, monkeypatch, tmp_path):
+    from cnc_dnc import cad, cad_dialog, dialogs
+    from cnc_dnc.kontur import beispiel_teil, generate
+    from cnc_dnc.kontur_dialog import KonturDialog
+    from test_cad import WELLE, _dreh_stl
+
+    pfad = _dreh_stl(str(tmp_path / "welle.stl"), WELLE)
+    m = cad.lade(pfad)
+    d = cad_dialog.CadDialog(app.root, app.fonts, m, beispiel_teil(), "welle.stl")
+    d.geometry("1300x760+0+0")
+    d.deiconify()
+    _pump(app, lambda: d.cv3.winfo_width() > 100 and len(d._items) > 100)
+    assert [k[0] for k in d.kandidaten][0] == "Modell-Z"
+    assert any("Bohrung Ø8 × 12" in s for s in d.erk.merkmale)
+    # Klick in die Seitenansicht nahe der Schulter Z-15 rastet dort ein
+    ab, s, x0 = d._seite_massstab()
+    x, y = ab(-15.2, 5)
+    d._klick_seite(type("E", (), {"x": int(x), "y": int(y)})())
+    assert d.z_null == 15 and d.v_null.get() == "15" and "Z15" in d.lb_null.cget("text")
+    # Eingabe von Hand
+    d.v_null.set("-2,5")
+    d._null_eingabe()
+    assert d.z_null == -2.5
+    # Klick auf die Planfläche bei Z-30 im 3D-Bild
+    netz = d._gezeichnet
+    for it, i in d._items.items():
+        a, b, c = (netz.punkte[q] for q in netz.dreiecke[i])
+        if all(abs(p[0] + 30) < 1e-6 for p in (a, b, c)):
+            co = d.cv3.coords(it)
+            x, y = (co[0] + co[2] + co[4]) / 3, (co[1] + co[3] + co[5]) / 3
+            if d.cv3.find_overlapping(x - 1, y - 1, x + 1, y + 1)[-1] == it:
+                d._klick_3d(int(x), int(y))
+                break
+    assert d.z_null == 30
+    # drehen und wenden
+    d._druck(type("E", (), {"x": 200, "y": 200})(), 1)
+    d._ziehen(type("E", (), {"x": 260, "y": 170})())
+    d._loslassen(type("E", (), {"x": 260, "y": 170})())
+    assert d.z_null == 30  # Ziehen ist kein Klick
+    d._wenden()
+    assert d.z_null == 0 and d.erk.seite2 is not None
+    d._wenden()
+    d._setze_null(20)
+    teil = d.ergebnis()
+    assert teil.z_null == 20 and [(p.x, p.z) for p in teil.punkte][1] == (20, 0)
+    d.destroy()
+
+    # im Assistenten: Taste „3D-Modell …“ mit Datei, Fenster und Rückfrage
+    k = KonturDialog(app.root, app.fonts, beispiel_teil(), machines=app.cfg.machines, machine_id=app.machine.id)
+    monkeypatch.setattr(cad_dialog.CadDialog, "show", lambda self: (self._setze_null(20), self.ergebnis())[1])
+    monkeypatch.setattr(dialogs, "confirm", lambda *a, **kw: True)
+    k.load_model(pfad)
+    _pump(app, lambda: k.teil.name == "WELLE")
+    assert k.teil.z_null == 20 and k.fvars["z_null"].get() == "20" and k.teil.bohr_d == 8
+    code = generate(k.teil).code
+    assert "STIRNSEITE BEI Z20" in code
+    k.destroy()
+    # STEP ohne Open CASCADE: verständliche Meldung
+    monkeypatch.setattr(cad, "step_verfuegbar", lambda: False)
+    meldung = []
+    monkeypatch.setattr(dialogs, "error", lambda *a, **kw: meldung.append(a[3]))
+    assert cad_dialog.modell_laden(app.root, app.fonts, str(tmp_path / "teil.step")) is None
+    assert "PC-Version" in meldung[0]
+    assert ("STL", "*.stl *.STL") in cad_dialog.dateitypen()
+
+
+def test_mesh_reduction_keeps_shape(tmp_path):
+    from cnc_dnc import cad
+    from cnc_dnc.cad_dialog import netz_aus_modell, netz_vereinfachen, volumen
+    from test_cad import WELLE, _dreh_stl
+
+    m = cad.lade(_dreh_stl(str(tmp_path / "w.stl"), WELLE, n=180))
+    n, p, d = cad.achsen_kandidaten(m)[0]
+    netz = netz_aus_modell(m, cad.lage_standard(m, p, d, n), 10 ** 6)
+    klein = netz_vereinfachen(netz, 800)
+    assert len(netz.dreiecke) > 3000 and 0 < len(klein.dreiecke) <= 800
+    assert abs(volumen(klein) - volumen(netz)) < 0.1 * abs(volumen(netz))
+    assert all(0 <= q < len(m.dreiecke) for q in klein.quelle)

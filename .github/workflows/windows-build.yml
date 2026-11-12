@@ -59,7 +59,7 @@ jobs:
           files: dist/CNC-Datenuebertragung.exe
 
   build-windows-pc:
-    name: EXE bauen (PC, Windows 10/11, 64 Bit – mit Bilder lesen)
+    name: EXE bauen (PC, Windows 10/11, 64 Bit – mit Bilder lesen und STEP)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,8 +77,10 @@ jobs:
         run: >
           python -m PyInstaller --noconfirm --clean --onefile --windowed
           --name CNC-Datenuebertragung-PC --icon assets\app.ico
-          --collect-submodules anthropic CNC-Datenuebertragung.pyw
-      - name: Selbsttest der EXE (inkl. Bilder lesen gegen lokalen Test-Server)
+          --collect-submodules anthropic --collect-all cascadio
+          --add-data "cnc_dnc\daten\beispiel_welle.step;cnc_dnc\daten"
+          CNC-Datenuebertragung.pyw
+      - name: Selbsttest der EXE (inkl. Bilder lesen gegen lokalen Test-Server und STEP lesen)
         shell: pwsh
         run: |
           $p = Start-Process -FilePath "dist\CNC-Datenuebertragung-PC.exe" -ArgumentList "--selftest" -Wait -PassThru

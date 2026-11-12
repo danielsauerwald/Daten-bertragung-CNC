@@ -154,6 +154,26 @@ def main(argv=None) -> int:
         if ki.verfuegbar()[0]:
             assert ki.selbsttest(), "Bilder lesen: Selbsttest fehlgeschlagen"
             print("Bilder lesen: bereit (PC-Version)")
+        # 3D-Modell: STL überall (Drehkörper schreiben, lesen, erkennen), STEP in der PC-Version
+        from . import cad
+        from .cad_dialog import CadDialog  # noqa: F401
+
+        stl = os.path.join(os.path.dirname(cfg_path), "selbsttest.stl")
+        cad.speichere_stl(cad.drehkoerper([(0, 0), (0, 16), (20, 16), (20, 10), (29, 10), (30, 9), (30, 0)]), stl)
+        mod = cad.lade(stl)
+        n_, p_, d_ = cad.achsen_kandidaten(mod)[0]
+        erk = cad.teil_aus_modell(mod, cad.lage_standard(mod, p_, d_, n_))
+        assert [(p.x, p.z) for p in erk.teil.punkte] == [(0, 0), (20, 0), (20, -10), (32, -10), (32, -30)], \
+            [(p.x, p.z) for p in erk.teil.punkte]
+        erk.teil.z_null = 10
+        assert "STIRNSEITE BEI Z10" in generate(erk.teil).code
+        if ki.verfuegbar()[0]:  # PC-Version: STEP mit Open CASCADE
+            assert cad.step_verfuegbar(), "STEP lesen fehlt in der PC-Version"
+            mod = cad.lade(os.path.join(os.path.dirname(cad.__file__), "daten", "beispiel_welle.step"))
+            n_, p_, d_ = cad.achsen_kandidaten(mod)[0]
+            erk = cad.teil_aus_modell(mod, cad.lage_standard(mod, p_, d_, n_))
+            assert sorted(f.art for f in erk.teil.fraesungen) == ["bohrung_radial", "flaeche"], erk.merkmale
+            print("3D-Modell (STEP): bereit (PC-Version)")
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)
