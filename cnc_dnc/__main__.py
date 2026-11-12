@@ -117,6 +117,14 @@ def main(argv=None) -> int:
 
         kres = generate(beispiel_teil(), rahmen=True, pp=vorlage("fanuc"))
         assert kres.ok and "G00 C180." in kres.code and "T0101" in kres.code
+        # Simulation mit Plattenform (Katalog) rechnet durch, ohne Kollision
+        from .simulation import DrehSimulation
+        from .sim_dialog import SimulationDialog  # noqa: F401
+        from .werkzeug_dialog import WerkzeugDialog  # noqa: F401
+
+        dsim = DrehSimulation(beispiel_teil(), generate(beispiel_teil(), rahmen=True))
+        dsim.bis_ende()
+        assert dsim.fertig and not [e for e in dsim.ereignisse if e.schwer]
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)

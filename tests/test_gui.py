@@ -903,3 +903,46 @@ def test_tool_dialog_uses_catalog(app):
     dlg._platte_changed()
     assert dlg.v["name"].get() == "MEIN SCHRUPPER"
     dlg.destroy()
+
+
+def test_simulation_dialog_plays_and_jumps_to_problems(app, monkeypatch):
+    from cnc_dnc.kontur import beispiel_teil, generate
+    from cnc_dnc.kontur_dialog import KonturDialog
+    from cnc_dnc.sim_dialog import SimulationDialog
+
+    t = beispiel_teil()
+    t.fraesungen = []
+    t.tool(2).halter, t.tool(2).platte = "SVVBN 2020K16", "VBMT 160404-F"  # ungeeignet
+    res = generate(t, rahmen=True)
+    dlg = SimulationDialog(app.root, app.fonts, t, res, titel="TEST")
+    dlg.geometry("1300x680+0+0")
+    dlg.deiconify()
+    dlg.update()
+    dlg.spielen()
+    for _ in range(3):
+        dlg._tick()
+    assert dlg.sim.i > 0 and dlg.btn_play.cget("text").startswith("❚❚")
+    assert "T1" in dlg.wz_info.cget("text") and "VNMG 160408" in dlg.wz_info.cget("text")
+    assert dlg.code_text.tag_ranges("aktiv")
+    dlg.ende()
+    assert dlg.sim.fertig and dlg.summary.cget("text").startswith("✕")
+    items = dlg.liste.get_children()
+    assert items and any("SVVBN" in dlg.liste.item(i, "values")[0] for i in items)
+    # Meldung antippen -> Simulation springt an die Stelle
+    first = next(i for i in items if dlg._ereignisse[int(i)].schritt >= 0)
+    dlg.liste.selection_set(first)
+    dlg._ereignis_gewaehlt()
+    assert dlg.sim.i == dlg._ereignisse[int(first)].schritt + 1 and not dlg.sim.fertig
+    dlg.lupe.set(True)
+    dlg._neu_zeichnen()
+    dlg.anfang()
+    assert dlg.sim.i == 0
+    dlg.destroy()
+
+    # Taste im Kontur-Assistenten öffnet die Simulation
+    opened = []
+    monkeypatch.setattr(SimulationDialog, "show", lambda self: opened.append(self.sim) or None)
+    k = KonturDialog(app.root, app.fonts, beispiel_teil(), machines=app.cfg.machines, machine_id=app.machine.id)
+    k.simulation()
+    assert opened and opened[0].schritte
+    k.destroy()

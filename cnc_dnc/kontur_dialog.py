@@ -606,12 +606,14 @@ class KonturDialog(Dialog):
         self.msg = tk.Label(bar, text="", bg=C["bg"], fg=C["text"], font=self.fonts.ui, anchor="w",
                             justify="left", wraplength=px(self, 640))
         self.msg.grid(row=0, column=0, sticky="w")
-        ttk.Button(bar, text="Abbrechen", command=self.cancel).grid(row=0, column=1, padx=(px(self, 8), 0))
+        self.sim_btn = ttk.Button(bar, text="▶ Simulation …", command=self.simulation)
+        self.sim_btn.grid(row=0, column=1, padx=(px(self, 8), 0))
+        ttk.Button(bar, text="Abbrechen", command=self.cancel).grid(row=0, column=4, padx=(px(self, 8), 0))
         self.insert_btn = ttk.Button(bar, text="Am Cursor einfügen", command=lambda: self.finish("einfuegen"))
-        self.insert_btn.grid(row=0, column=2, padx=(px(self, 8), 0))
+        self.insert_btn.grid(row=0, column=5, padx=(px(self, 8), 0))
         self.new_btn = ttk.Button(bar, text="Als neues Programm", style="Primary.TButton",
                                   command=lambda: self.finish("neu"))
-        self.new_btn.grid(row=0, column=3, padx=(px(self, 8), 0))
+        self.new_btn.grid(row=0, column=6, padx=(px(self, 8), 0))
 
     # ------------------------------------------------------------ Felder <-> Teil
 
@@ -682,7 +684,7 @@ class KonturDialog(Dialog):
         else:
             self._set_msg("✓  {} Arbeitsgänge – Code und Werkzeugbahn im Reiter „Code“.".format(
                 len(self.res.arbeitsgaenge)), "ok")
-        for b in (self.insert_btn, self.new_btn):
+        for b in (self.insert_btn, self.new_btn, self.sim_btn):
             b.state(["disabled"] if self.res.errors else ["!disabled"])
 
     def _set_msg(self, text: str, level: str) -> None:
@@ -750,6 +752,20 @@ class KonturDialog(Dialog):
             return
         self.result = (mode, res.code)
         self.destroy()
+
+    def simulation(self) -> None:
+        """Programm mit echter Plattenform abspielen (Drehen)."""
+        if self._job is not None:
+            self.after_cancel(self._job)
+            self.refresh()
+        if self.res.errors:
+            return
+        if not self.res.moves:
+            dialogs.info(self, self.fonts, "Nichts zu simulieren", "Das Programm enthält keine Drehbearbeitung.")
+            return
+        from .sim_dialog import SimulationDialog
+
+        SimulationDialog(self, self.fonts, self.teil, self.res, titel=self.teil.name).show()
 
     def _machine_name(self) -> str:
         return self.machine.display_name if self.machine is not None else ""

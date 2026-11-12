@@ -568,6 +568,9 @@ class Move:
     z1: float
     r1: float
     radius: float = 0.0
+    t: int = 0  # Werkzeugnummer
+    comp: str = ""  # Schneidenradiuskorrektur in diesem Satz: "" | "G41" | "G42"
+    line: int = -1  # Zeile im fertigen Programm (0-basiert)
 
     def points(self) -> List[Tuple[float, float]]:
         """Stützpunkte (z, r) inkl. Start; Bögen (kürzerer Bogen, CR=) in 10°-Schritten."""
@@ -592,16 +595,22 @@ class _Out:
         self.moves: List[Move] = []
         self.z: Optional[float] = None
         self.r: Optional[float] = None
+        self.tool = 0
+        self.comp = ""
+        self.start: Optional[Tuple[float, float]] = None  # Startpunkt (Werkzeugwechselpunkt) für die Simulation
 
     def raw(self, line: str) -> None:
         self.lines.append(line)
 
     def _track(self, kind: str, z: Optional[float], r: Optional[float], radius: float = 0.0) -> None:
-        nz = self.z if z is None else z
-        nr = self.r if r is None else r
-        if self.z is not None and self.r is not None and nz is not None and nr is not None:
-            self.moves.append(Move(kind, self.z, self.r, nz, nr, radius))
-        self.z, self.r = nz, nr
+        oz = self.z if self.z is not None else (self.start[0] if self.start else None)
+        orr = self.r if self.r is not None else (self.start[1] if self.start else None)
+        nz = oz if z is None else z
+        nr = orr if r is None else r
+        if oz is not None and orr is not None and nz is not None and nr is not None:
+            self.moves.append(Move(kind, oz, orr, nz, nr, radius, self.tool, self.comp, len(self.lines) - 1))
+        self.z = nz if z is not None or self.z is not None else None
+        self.r = nr if r is not None or self.r is not None else None
 
     def move(self, kind: str, r: Optional[float] = None, z: Optional[float] = None, pre: str = "",
              post: str = "", radius: float = 0.0) -> None:
@@ -617,6 +626,10 @@ class _Out:
         words += axes
         if post:
             words.append(post)
+        if "G41" in pre or "G42" in pre:
+            self.comp = "G41" if "G41" in pre else "G42"
+        elif "G40" in pre:
+            self.comp = ""
         self.raw(" ".join(words))
         short = {"G00": "G0", "G01": "G1", "G02": "G2", "G03": "G3"}[kind]
         self._track(short, z, r, radius)
@@ -637,6 +650,7 @@ class Ergebnis:
 
 def _turn_head(out: _Out, title: str, w: Werkzeug) -> None:
     pp = out.pp
+    out.tool, out.comp = w.t, ""
     out.raw("")
     out.raw(pp.comment(title + " " + w.name))  # Kommentar direkt über dem Werkzeug (Einrichteblatt)
     out.lines.extend(pp.tool_lines(w.t, w.d, pp.vorschub_u, pp.ebene_drehen, w.s))
@@ -1208,6 +1222,7 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
     if res.errors:
         return res
     out = _Out(pp)
+    out.start = (pp.wechsel_z, pp.wechsel_x / 2.0)
     _turning(teil, geom, res, out)
     _milling(teil, geom, res, out)
     if res.errors:
@@ -1226,6 +1241,8 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
     if rahmen:
         head += pp.fill(pp.start)
     body = list(out.lines)
+    for mv in out.moves:
+        mv.line += len(head)
     tail = [""] + pp.fill(pp.ende) if rahmen else []
     res.code = "\n".join(head + body + tail) + "\n"
     res.moves = out.moves
