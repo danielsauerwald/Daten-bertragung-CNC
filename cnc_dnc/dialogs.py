@@ -92,8 +92,11 @@ class Dialog(tk.Toplevel):
             self.grab_set()
         except tk.TclError:
             pass
-        self.lift()
-        self.focus_force()
+        try:
+            self.lift()
+            self.focus_force()
+        except tk.TclError:  # schon wieder zu (z. B. Wartefenster, Arbeit war sofort fertig)
+            return self.result
         self.wait_window()
         return self.result
 

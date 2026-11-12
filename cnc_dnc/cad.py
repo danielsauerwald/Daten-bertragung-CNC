@@ -84,13 +84,20 @@ class Modell:
         return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
-def step_verfuegbar() -> bool:
-    import importlib.util
+_STEP_OK: Optional[bool] = None
 
-    try:
-        return importlib.util.find_spec("cascadio") is not None
-    except (ImportError, ValueError):
-        return False
+
+def step_verfuegbar() -> bool:
+    """Lässt sich Open CASCADE (cascadio) wirklich laden? Einmal prüfen, dann merken."""
+    global _STEP_OK
+    if _STEP_OK is None:
+        try:
+            import cascadio  # noqa: F401
+
+            _STEP_OK = True
+        except Exception:
+            _STEP_OK = False
+    return _STEP_OK
 
 
 def lade(pfad: str) -> Modell:
@@ -179,9 +186,9 @@ def lade_stl(pfad: str) -> Modell:
 def lade_step(pfad: str, toleranz: float = 0.01) -> Modell:
     try:
         import cascadio
-    except Exception:
+    except Exception as exc:
         raise CADFehler("STEP-Dateien liest nur die PC-Version (Windows 10/11). Bitte das Modell im CAD als STL "
-                        "speichern oder die PC-Version benutzen.")
+                        "speichern oder die PC-Version benutzen. ({})".format(exc))
     try:
         with open(pfad, "rb") as fh:
             roh = fh.read()
