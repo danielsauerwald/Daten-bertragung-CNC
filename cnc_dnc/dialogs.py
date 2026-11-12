@@ -339,7 +339,7 @@ class MachineEditDialog(Dialog):
         self.nb.pack(fill="both", expand=True, padx=px(self, 16), pady=(px(self, 16), 0))
         self.tabs: Dict[str, tk.Frame] = {}
         for key, title in (("general", "Allgemein"), ("serial", "Schnittstelle"), ("send", "Senden"),
-                           ("receive", "Empfangen")):
+                           ("receive", "Empfangen"), ("post", "Postprozessor")):
             f = tk.Frame(self.nb, bg=C["surface"], padx=px(self, 20), pady=px(self, 16))
             f.grid_columnconfigure(1, weight=1)
             self.nb.add(f, text=title)
@@ -392,6 +392,23 @@ class MachineEditDialog(Dialog):
                    hint="0 = nur von Hand beenden. Die Zeit läuft erst ab dem ersten Zeichen.")
         self._check("receive", "Steuerzeichen (NUL, XON/XOFF …) entfernen", "strip_control_chars")
         self._check("receive", "Empfangene Programme automatisch speichern", "auto_save_received")
+
+        # Postprozessor (Kontur-Assistent): eigenes Fenster mit Vorschau
+        self.post_data = dict(p.post or {})
+        tab = self.tabs["post"]
+        tk.Label(tab, text="G- und M-Befehle dieser Maschine für „Kontur → Code“: Werkzeugaufruf, Spindel, "
+                           "Kühlmittel, angetriebenes Werkzeug (z. B. S3=/M3= oder S4=/M4=), C-Achse, Klemmung, "
+                           "Programmanfang und -ende.", bg=C["surface"], fg=C["muted"], font=fonts.ui, anchor="w",
+                 justify="left", wraplength=px(self, 600)).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.post_info = tk.Label(tab, text="", bg=C["surface_alt"], fg=C["text"], font=fonts.gutter, anchor="w",
+                                  justify="left", padx=px(self, 8), pady=px(self, 6))
+        self.post_info.grid(row=1, column=0, columnspan=2, sticky="ew", pady=px(self, 10))
+        bar_post = tk.Frame(tab, bg=C["surface"])
+        bar_post.grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Button(bar_post, text="Postprozessor bearbeiten …", command=self._edit_post).pack(side="left")
+        ttk.Button(bar_post, text="Auf Vorlage zurücksetzen", command=self._reset_post).pack(
+            side="left", padx=(px(self, 10), 0))
+        self._update_post_info()
 
         bar = tk.Frame(self, bg=C["bg"])
         bar.pack(fill="x", padx=px(self, 16), pady=px(self, 14))
@@ -462,7 +479,39 @@ class MachineEditDialog(Dialog):
 
     # -- Aktionen --------------------------------------------------------------
 
+    def _post(self):
+        from .postpro import Postprozessor
+
+        control = _inverse(CONTROLS).get(self.v["control"].get(), "generic")
+        return Postprozessor.from_dict(self.post_data, control)
+
+    def _update_post_info(self) -> None:
+        pp = self._post()
+        own = "eigene Einstellung" if self.post_data else "Vorlage zur Steuerung (noch nicht angepasst)"
+        self.post_info.configure(text="{}\n{}\nWerkzeug:  {}\nAngetr. WZ: {} … {}\nPositionieren: {}".format(
+            own, pp.kurz().split(" · ")[0], " / ".join(pp.tool_lines(1, 1, pp.vorschub_u, pp.ebene_drehen, 2300)),
+            " / ".join(pp.fill(pp.awz_ein, S=3000)), " / ".join(pp.fill(pp.awz_aus)),
+            " / ".join(pp.fill(pp.c_pos, W=90))))
+
+    def _edit_post(self) -> None:
+        from .postpro_dialog import PostproDialog
+
+        name = self.v["name"].get().strip() or "Maschine"
+        res = PostproDialog(self, self.fonts, name, self._post()).show()
+        if res is not None:
+            self.post_data = res.to_dict()
+            self._update_post_info()
+
+    def _reset_post(self) -> None:
+        if self.post_data and confirm(self, self.fonts, "Postprozessor zurücksetzen",
+                                      "Eigene Einstellungen verwerfen und die Vorlage zur Steuerung benutzen?",
+                                      yes="Zurücksetzen"):
+            self.post_data = {}
+            self._update_post_info()
+
     def _apply_control_preset(self, _e=None) -> None:
+        if hasattr(self, "post_info"):
+            self._update_post_info()
         key = _inverse(CONTROLS).get(self.v["control"].get(), "generic")
         preset = CONTROL_PRESETS.get(key, {})
         if "frame_percent" in preset:
@@ -561,6 +610,7 @@ class MachineEditDialog(Dialog):
             idle_timeout_s=idle,
             strip_control_chars=bool(v["strip_control_chars"].get()),
             auto_save_received=bool(v["auto_save_received"].get()),
+            post=dict(self.post_data),
         )
         return MachineProfile.from_dict(data)
 

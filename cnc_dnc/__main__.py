@@ -111,6 +111,12 @@ def main(argv=None) -> int:
 
         kres = generate(beispiel_teil(), rahmen=True)
         assert kres.ok and "SPOS=DC(180)" in kres.code and "G42 G01 Z0" in kres.code
+        # Postprozessor: Fanuc-Vorlage (C-Achse, Dezimalpunkt) und Fenster vorhanden
+        from .postpro import vorlage
+        from .postpro_dialog import PostproDialog  # noqa: F401
+
+        kres = generate(beispiel_teil(), rahmen=True, pp=vorlage("fanuc"))
+        assert kres.ok and "G00 C180." in kres.code and "T0101" in kres.code
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)

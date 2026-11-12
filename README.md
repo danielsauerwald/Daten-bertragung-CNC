@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.9
+# CNC-Datenübertragung 2.10
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -43,7 +43,10 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
   Bemerkungen, siehe [Korrekturblatt](#korrekturblatt).
 - **Kontur → Code**: Teil mit Maßen eingeben, in der Zeichnung antippen, ob gedreht, gefräst
   oder entgratet wird – auch Flächen, Nuten und Bohrungen auf Winkellagen (C-/Y-Achse).
-  Heraus kommt ein Sinumerik-Programm, siehe [Kontur → Code](#kontur--code).
+  Heraus kommt ein fertiges Programm, siehe [Kontur → Code](#kontur--code).
+- **Postprozessor pro Maschine**: G- und M-Befehle je Maschine einstellbar, z. B. angetriebenes
+  Werkzeug `S3=/M3=` oder `S4=/M4=` bei Siemens, C-Achse bei Fanuc, siehe
+  [Postprozessor](#postprozessor-pro-maschine).
 - **Maschinenliste** mit allen Schnittstellen-Einstellungen je Maschine.
 - **LEDs für die Steuerleitungen** CTS, DSR, CD und RI sowie TX/RX, wie im alten Programm.
 - **Warnung vor Sonderzeichen** (ä, ö, ü, Ø …), die viele Steuerungen mit Alarm ablehnen.
@@ -288,7 +291,8 @@ Die Datei heißt z. B. `METLOG_300069_Korrekturblatt.pdf` und liegt neben dem Pr
 Die Taste **Kontur → Code …** (rechts unter „BEARBEITEN“) öffnet den Kontur-Assistenten:
 Maße des Teils eingeben, in der Zeichnung ein Element antippen und sagen, was damit passiert –
 **drehen**, **fräsen** (auch auf Winkellagen mit C- und Y-Achse) oder **entgraten**. Daraus
-entsteht ein Sinumerik-Programm im Stil der vorhandenen Programme.
+entsteht ein Programm im Stil der vorhandenen Programme – mit den G- und M-Befehlen der Maschine
+aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
 
 ![Kontur-Assistent: Element angetippt](docs/kontur.png)
 
@@ -321,7 +325,8 @@ entsteht ein Sinumerik-Programm im Stil der vorhandenen Programme.
 4. **Reiter „Werkzeuge“**: Revolverbelegung mit T-Nummer, Bezeichnung (kommt in den Kommentar),
    Art, Lage (radial/axial), Ø, Drehzahl, Vorschub und Zustellung.
 5. **Reiter „Code“**: fertiges Programm und die Werkzeugbahn in der Zeichnung (gestrichelt
-   Eilgang, durchgezogen Vorschub). Dann **Als neues Programm** (mit `%_N_…_MPF` und `M30`) oder
+   Eilgang, durchgezogen Vorschub). Dann **Als neues Programm** (mit Programmanfang und -ende,
+   z. B. `%_N_…_MPF` … `M30`) oder
    **Am Cursor einfügen**, z. B. in ein vorhandenes KANAL1-Programm. Speichern und Senden wie gewohnt.
 
 ![Code und Werkzeugbahn](docs/kontur_code.png)
@@ -346,13 +351,14 @@ G40 G00 X150
 G00 Z130
 ```
 
-Fräsen und Bohren: Hauptspindel mit `SPOS=DC(Winkel)` positionieren, angetriebenes Werkzeug
-`S3=… M3=3`, Vorschub `G94`, Ebene `G19` (radial, Y-Achse) bzw. `G17` (axial). Eingetaucht wird
-nur außerhalb des Teils, zum Schluss `M3=5`, `Y0`, Wechselpunkt und `G18`:
+Fräsen und Bohren: Hauptspindel aus, positionieren (`SPOS=DC(Winkel)`), angetriebenes Werkzeug
+ein (`S3=… M3=3`), Vorschub `G94`, Ebene `G19` (radial, Y-Achse) bzw. `G17` (axial). Eingetaucht
+wird nur außerhalb des Teils, zum Schluss `Y0`, Werkzeug aus (`M3=5`), Wechselpunkt und `G18`:
 
 ```
 ;FRAESEN FLAECHE SW17 FRAESER D8
 T05D1 G94 G19 M8
+M5
 SPOS=DC(0)
 S3=3000 M3=3
 G00 Y-10.268 Z-3
@@ -364,10 +370,67 @@ SPOS=DC(180)
 …
 ```
 
-**Reiter „Maschine“**: Werkzeugwechselpunkt (X150 Z130), Sicherheitsabstand, Vorlage zum
-Positionieren der Spindel (`SPOS=DC({W})`, `{W}` = Winkel; z. B. auch `C=DC({W})`), Spindelnummer
-des angetriebenen Werkzeugs und M-Befehle zum Klemmen/Lösen der Spindel. Alle Eingaben werden
-gemerkt (`kontur.json` neben der `config.json`).
+Die Eingaben zum Teil werden gemerkt (`kontur.json` neben der `config.json`).
+
+### Postprozessor (pro Maschine)
+
+Welche G- und M-Befehle im Programm stehen, legt der **Postprozessor der Maschine** fest. Jede
+Maschine in der Maschinenliste hat ihren eigenen: **⚙ Maschinen → Bearbeiten → Reiter
+„Postprozessor“** oder im Kontur-Assistenten im Reiter **„Postprozessor“** (dort wählt man auch die
+Maschine). Rechts zeigt eine Vorschau sofort, wie der Code damit aussieht.
+
+![Postprozessor Siemens mit S4/M4=](docs/postprozessor.png)
+
+Fertige **Vorlagen** zum Übernehmen:
+
+| Vorlage | Werkzeug | Drehen | Positionieren | Angetr. Werkzeug | Format |
+|---|---|---|---|---|---|
+| Siemens Sinumerik S3 | `T01D1` | `G95 G18 S… M3 M8` | `SPOS=DC(90)` | `S3=3000 M3=3` … `M3=5` | `;Kommentar`, `CR=` |
+| Siemens Sinumerik S4 | `T01D1` | `G95 G18 S… M3 M8` | `SPOS=DC(90)` | `S4=3000 M4=3` … `M4=5` | `;Kommentar`, `CR=` |
+| Fanuc C-Achse | `T0101` | `G99`, `G97 S… M3`, `M8` | `G00 C90.` | `M13 S3000` … `M15` | `(Kommentar)`, `R`, `X20.` |
+
+Einstellbar sind:
+
+- **Format**: Steuerung (Sinumerik/Fanuc), Kommentar (`;{TEXT}` oder `({TEXT})`), Programmanfang
+  (z. B. `%_N_{NAME}_MPF` oder `%|O{NR} ({NAME})`), Startsatz (`G54 G90`), Programmende,
+  Kreisradius (`CR=` oder `R`), Dezimalpunkt immer schreiben (Fanuc: `X20.` statt `X20`, das sonst
+  als 0,02 mm gelesen wird), alles in einer Zeile oder getrennt.
+- **Drehen**: Werkzeugaufruf (`T{T2}D{D}` → `T01D1`, `T{T2}{D2}` → `T0101`), Vorschub mm/U (`G95`/`G99`),
+  Ebene (`G18`), Hauptspindel ein/aus, Kühlmittel ein/aus, Werkzeugwechselpunkt X/Z.
+- **C-/Y-Achse, angetriebenes Werkzeug**: Vorschub mm/min (`G94`/`G98`), Ebenen radial/axial
+  (`G19`/`G17`), C-Achse ein/aus, Spindel positionieren (`{W}` = Winkel), Klemmen/Lösen,
+  angetriebenes Werkzeug ein/aus (`{S}` = Drehzahl).
+
+Platzhalter: `{T}` `{T2}` Werkzeug, `{D}` `{D2}` Korrektur, `{S}` Drehzahl, `{W}` Winkel,
+`{NAME}` Programmname, `{NR}` Programmnummer, `{TEXT}` Kommentar. Ein `|` beginnt eine neue Zeile.
+
+So sieht derselbe Arbeitsgang mit der Fanuc-Vorlage aus:
+
+```
+(FRAESEN FLAECHE SW17 FRAESER D8)
+T0501
+G19 G98
+M8
+M5
+G00 C0.
+M13 S3000
+G00 Y-10.268 Z-3.
+…
+G00 C180.
+…
+G00 Y0.
+M15
+M9
+G00 X150.
+G00 Z130.
+G18
+```
+
+> Bei Fanuc sind die Befehle für C-Achse und angetriebenes Werkzeug je Hersteller verschieden.
+> Die Vorlage ist ein Beispiel; „C-Achse ein/aus“ ist leer, bis man die Befehle aus dem
+> Maschinenhandbuch einträgt – solange zeigt der Assistent einen Hinweis.
+
+![Postprozessor Fanuc](docs/postprozessor_fanuc.png)
 
 ### Prüfungen
 
@@ -381,13 +444,13 @@ Der Assistent erzeugt lieber keinen Code als einen gefährlichen. Er meldet z. B
 
 ### Grenzen
 
-Noch nicht enthalten: andere Steuerungen als Sinumerik, Einstiche, Innenbearbeitung,
+Noch nicht enthalten: Heidenhain, Einstiche, Innenbearbeitung,
 Bahnen mit TRANSMIT/TRACYL. Die Ecken einer Nut haben den Fräserradius; die Kanten an der
 Stirnseite einer offenen Nut werden nicht entgratet.
 
 > **Wichtig:** Der erzeugte Code ist ein Vorschlag. Vor dem ersten Lauf an der Steuerung
 > simulieren bzw. mit reduziertem Eilgang und Vorschub einfahren, Werkzeugdaten und Spannung
-> prüfen. Maschinenspezifische M-Befehle (Klemmung, C-Achse) im Reiter „Maschine“ eintragen.
+> prüfen. Maschinenspezifische M-Befehle (Klemmung, C-Achse) im Postprozessor eintragen.
 
 ## Warum sind die Zeilen früher verrutscht?
 
@@ -465,6 +528,8 @@ cnc_dnc/
   textutil.py     Zeilenenden, Sendeaufbereitung, Programmende, Programmnamen
   kontur.py       Kontur-Assistent: Geometrie, Schruppen/Schlichten, Fräsen auf Winkellagen
   kontur_dialog.py  Fenster „Kontur → Code“ mit Zeichnung zum Antippen
+  postpro.py      Postprozessor je Maschine: G-/M-Befehle als Vorlagen, Sinumerik/Fanuc
+  postpro_dialog.py  Fenster „Postprozessor“ mit Vorschau
   serial_link.py  Schnittstelle, Senden/Empfangen im Hintergrund-Thread
   config.py       Maschinenprofile, Speichern als JSON
   app.py          Hauptfenster

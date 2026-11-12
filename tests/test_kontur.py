@@ -16,6 +16,7 @@ import pytest
 
 from cnc_dnc import kontur as k
 from cnc_dnc.kontur import Fraesung, KPunkt, Teil, Werkzeug
+from cnc_dnc.postpro import vorlage
 
 # --------------------------------------------------------------------------
 # Hilfen: einfaches Abtragsmodell für Außendrehen
@@ -82,24 +83,29 @@ def part_profile(teil: Teil, sim: Sim):
     return prof
 
 
-_WORD = re.compile(r"([XZ]|CR=)(-?[\d.]+)")
+_WORD = re.compile(r"(CR=|[XZR])(-?[\d.]+)")
 
 
 def turning_moves(code: str):
-    """(Art, Start, Ende, Zeile) für alle Bewegungen in Dreh-Arbeitsgängen (Werkzeug mit G95)."""
+    """(Art, Start, Ende, Zeile) für alle Bewegungen in Dreh-Arbeitsgängen (Vorschub je Umdrehung).
+
+    Versteht Sinumerik (T01D1 G95 … , CR=) und Fanuc (T0101 / G99, R, Dezimalpunkt).
+    """
     moves = []
     turning = False
     pos = None
     modal = "G00"
     for line in code.split("\n"):
         s = line.strip()
-        if not s or s.startswith(";"):
+        if not s or s.startswith(";") or s.startswith("("):
             continue
-        if re.match(r"T\d+D\d", s):
-            turning = "G95" in s
+        if re.match(r"T\d+", s):
             pos = None
-            continue
-        if not turning:
+        if re.search(r"\bG9[59]\b", s):
+            turning = True
+        if re.search(r"\bG9[48]\b", s):
+            turning = False
+        if re.match(r"T\d+", s) or not turning:
             continue
         g = re.search(r"\bG0?([0-3])\b", s)
         if g:
@@ -113,7 +119,7 @@ def turning_moves(code: str):
             continue
         new = (vals.get("Z", pos[0]), vals.get("X", 2 * pos[1]) / 2)
         if modal in ("G02", "G03"):
-            moves.extend(_arc_pieces(modal, pos, new, vals["CR="], s))
+            moves.extend(_arc_pieces(modal, pos, new, vals.get("CR=", vals.get("R")), s))
         else:
             moves.append((modal, pos, new, s))
         pos = new
@@ -153,7 +159,7 @@ def check_turning(teil: Teil, code: str):
         errs += sim.segment(a, b, kind == "G00", prof, 0.0, "[{}]".format(line))
     # Schruppen getrennt prüfen: darf nicht näher als das halbe Aufmaß an die Kontur
     sim2 = Sim(teil, z_min)
-    rough_code = code.split(";FERTIGDREHEN")[0]
+    rough_code = re.split(r"[;(]FERTIGDREHEN", code)[0]
     for kind, a, b, line in turning_moves(rough_code):
         if kind != "G00":
             errs += sim2.segment(a, b, False, prof, rough_tol, "[Schruppen: {}]".format(line))
@@ -280,9 +286,10 @@ def test_contour_radius():
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("post", ["sin_s3", "fanuc"])
 @pytest.mark.parametrize("variante", ["welle", "welle_ap07", "ohne_aufmass", "beispiel", "spitze",
                                       "stirn_frei", "ende_frei", "nur_zylinder"])
-def test_turning_is_safe_and_complete(variante):
+def test_turning_is_safe_and_complete(variante, post):
     if variante == "welle":
         t = welle()
     elif variante == "welle_ap07":
@@ -306,7 +313,7 @@ def test_turning_is_safe_and_complete(variante):
     else:
         t = k.neues_teil()
         t.punkte = [KPunkt(0, 0), KPunkt(30, 0), KPunkt(30, -20)]
-    res = k.generate(t)
+    res = k.generate(t, rahmen=True, pp=vorlage(post))
     assert res.ok, res.errors
     errs, sim, prof = check_turning(t, res.code)
     assert not errs, errs[:5]
@@ -375,8 +382,9 @@ def test_program_frame_and_tools_for_setup_sheet():
 
 
 def _block(code: str, title: str) -> str:
-    i = code.index(";" + title)
-    j = code.find("\n;", i + 1)
+    """Arbeitsgang ab der Kommentarzeile mit ``title`` bis zur nächsten Leerzeile."""
+    i = code.rfind("\n", 0, code.index(title)) + 1
+    j = code.find("\n\n", i)
     return code[i:] if j < 0 else code[i:j]
 
 
@@ -483,18 +491,59 @@ def test_wrong_tool_type_and_missing_tool():
     assert "T42 steht nicht in der Werkzeugliste" in k.generate(t).errors[0]
 
 
-def test_machine_templates():
+def test_postprocessor_s4_clamping_and_own_positioning():
     t = k.beispiel_teil()
-    t.spos = "C=DC({W})"
-    t.klemmen = "M10"
-    t.loesen = "M11"
-    t.wz_spindel = 4
-    res = k.generate(t)
+    pp = vorlage("sin_s4")
+    pp.c_pos = "C=DC({W})"
+    pp.klemmen = "M10"
+    pp.loesen = "M11"
+    res = k.generate(t, pp=pp)
     assert res.ok, res.errors
     b = _block(res.code, "FRAESEN FLAECHE SW17")
     assert "C=DC(0)\nM10\nS4=3000 M4=3" in b and "M11\nC=DC(180)\nM10" in b and "M4=5" in b
-    t.spos = "SPOS=0"
-    assert "{W}" in k.generate(t).errors[0]
+    assert "S3=" not in res.code and "M3=" not in res.code
+    pp.c_pos = "SPOS=0"
+    assert "{W}" in k.generate(t, pp=pp).errors[0]
+
+
+def test_fanuc_output():
+    from cnc_dnc.setupsheet import extract_tools
+    from cnc_dnc.textutil import analyze_program
+
+    pp = vorlage("fanuc")
+    t = k.beispiel_teil()
+    t.name = "O4711 Welle"
+    res = k.generate(t, rahmen=True, pp=pp, maschine="3: Doosan")
+    assert res.ok, res.errors
+    assert any("C-Achse ein" in w for w in res.warnings)  # Vorlage: M-Befehl der Maschine fehlt noch
+    lines = res.code.rstrip("\n").split("\n")
+    assert lines[:3] == ["%", "O4711 (O4711_WELLE)", "(KONTUR-ASSISTENT TEIL O4711_WELLE)"]
+    assert "(MASCHINE 3: DOOSAN)" in lines and lines[-2:] == ["M30", "%"]
+    assert "(VORDREHEN VNMG08)\nT0101\nG18 G99\nG97 S2300 M3\nM8\n" in res.code
+    assert "G02 X22. Z-15. R1." in res.code and "G42 G01 Z0. F0.1" in res.code
+    b = _block(res.code, "FRAESEN FLAECHE SW17")
+    assert "T0501\nG19 G98\nM8\nM5\nG00 C0.\nM13 S3000\n" in b
+    assert "G00 C180." in b and "M15\nM9\nG00 X150.\nG00 Z130.\nG18" in b
+    assert "SPOS" not in res.code and ";" not in res.code
+    # Fanuc: jede Koordinate und jeder Vorschub mit Dezimalpunkt (sonst µm!)
+    for ln in lines:
+        if not ln.startswith("("):
+            assert not re.search(r"(?<![A-Z])[XYZCFR]-?\d+(?![\d.])", ln), ln
+    assert analyze_program(res.code).dialect == "fanuc"
+    tools = extract_tools(res.code)
+    assert tools[0].description == "VORDREHEN VNMG08" and tools[2].description.startswith("FRAESEN FLAECHE")
+    # mit eingetragenen C-Achs-Befehlen keine Warnung mehr
+    pp.c_ein, pp.c_aus = "M35", "M34"
+    res = k.generate(t, pp=pp)
+    assert not res.warnings
+    b = _block(res.code, "FRAESEN FLAECHE SW17")
+    assert "M5\nM35\nG00 C0." in b and "M15\nM9\nM34\nG00 X150." in b
+
+
+def test_postprocessor_change_point_checked():
+    pp = vorlage("sin_s3")
+    pp.wechsel_x = 20
+    assert "liegt nicht außerhalb des Rohteils" in k.generate(k.beispiel_teil(), pp=pp).errors[0]
 
 
 def test_only_milling_without_turning():

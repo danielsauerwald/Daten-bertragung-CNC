@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import math
 import re
-import unicodedata
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from .postpro import Postprozessor, fmt, nc_name, nc_text, program_number  # noqa: F401 (auch für Aufrufer)
 
 EPS = 1e-6
 TOL = 1e-3  # Eingabetoleranz in mm
@@ -114,13 +115,8 @@ class Teil:
     aufmass_x: float = 0.4  # Schlichtaufmaß im Durchmesser
     aufmass_z: float = 0.1
     kante: float = 0.2  # „Entgraten“ an Drehkanten = Fase dieser Größe
-    wechsel_x: float = 150.0
-    wechsel_z: float = 130.0
     sicherheit: float = 2.0
-    spos: str = "SPOS=DC({W})"
-    wz_spindel: int = 3
-    klemmen: str = ""
-    loesen: str = ""
+    # Werkzeugwechselpunkt, M-/G-Befehle usw. stehen im Postprozessor der Maschine (postpro.py)
 
     def tool(self, t: int) -> Optional[Werkzeug]:
         for w in self.werkzeuge:
@@ -238,15 +234,6 @@ def beispiel_teil() -> Teil:
 # ==========================================================================
 
 
-def fmt(v: float) -> str:
-    """Zahl für das NC-Programm: max. 3 Nachkommastellen, ohne überflüssige Nullen."""
-    v = round(float(v), 3)
-    if abs(v) < 0.0005:
-        return "0"
-    s = "{:.3f}".format(v).rstrip("0").rstrip(".")
-    return s
-
-
 def parse_num(text: str) -> float:
     """Zahl aus einer Eingabe – Komma oder Punkt als Dezimaltrenner."""
     s = str(text).strip().replace(",", ".").replace(" ", "")
@@ -279,27 +266,6 @@ def gleich_verteilt(anzahl: int, start: float = 0.0) -> List[float]:
 
 def winkel_text(winkel: Sequence[float]) -> str:
     return " ".join(fmt(w) for w in winkel)
-
-
-_TRANS = str.maketrans({"Ä": "AE", "Ö": "OE", "Ü": "UE", "ß": "SS", "Ø": "D", "ø": "D", "°": " GRAD", "×": "X"})
-
-
-def nc_text(text: str) -> str:
-    """Kommentartext nur aus Zeichen, die jede Steuerung verträgt (A-Z, 0-9, wenige Zeichen)."""
-    s = str(text).upper().translate(_TRANS)
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"[^A-Z0-9 .,:+\-_=/*#]", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def nc_name(text: str) -> str:
-    s = re.sub(r"[^A-Z0-9_]", "_", nc_text(text).replace(" ", "_"))
-    s = re.sub(r"_+", "_", s).strip("_")
-    if not s:
-        s = "TEIL"
-    if s[0].isdigit():
-        s = "T" + s
-    return s[:24]
 
 
 # ==========================================================================
@@ -545,7 +511,8 @@ class Move:
 
 
 class _Out:
-    def __init__(self) -> None:
+    def __init__(self, pp: Postprozessor) -> None:
+        self.pp = pp
         self.lines: List[str] = []
         self.moves: List[Move] = []
         self.z: Optional[float] = None
@@ -567,9 +534,9 @@ class _Out:
         words = [w for w in (pre, kind) if w]
         axes = []
         if r is not None and (self.r is None or fmt(2 * r) != fmt(2 * self.r) or kind in ("G02", "G03")):
-            axes.append("X" + fmt(2 * r))
+            axes.append("X" + self.pp.num(2 * r))
         if z is not None and (self.z is None or fmt(z) != fmt(self.z) or kind in ("G02", "G03")):
-            axes.append("Z" + fmt(z))
+            axes.append("Z" + self.pp.num(z))
         if not axes and not pre and not post:
             return
         words += axes
@@ -593,19 +560,18 @@ class Ergebnis:
         return not self.errors
 
 
-def _tool_line(w: Werkzeug, extra: str) -> str:
-    return "T{:02d}D{} {}".format(w.t, w.d, extra).strip()
-
-
 def _turn_head(out: _Out, title: str, w: Werkzeug) -> None:
+    pp = out.pp
     out.raw("")
-    out.raw(";" + nc_text(title + " " + w.name))
-    out.raw(_tool_line(w, "G95 G18 S{} M3 M8".format(fmt(w.s))))
+    out.raw(pp.comment(title + " " + w.name))  # Kommentar direkt über dem Werkzeug (Einrichteblatt)
+    out.lines.extend(pp.tool_lines(w.t, w.d, pp.vorschub_u, pp.ebene_drehen, w.s))
 
 
-def _retract(out: _Out, teil: Teil, g40: bool = False) -> None:
-    out.move("G00", r=teil.wechsel_x / 2.0, pre="G40" if g40 else "")
-    out.move("G00", z=teil.wechsel_z)
+def _retract(out: _Out, g40: bool = False) -> None:
+    pp = out.pp
+    out.lines.extend(pp.fill(pp.kuehl_aus))
+    out.move("G00", r=pp.wechsel_x / 2.0, pre="G40" if g40 else "")
+    out.move("G00", z=pp.wechsel_z)
 
 
 def _cross(pl: List[Tuple[float, float]], level: float) -> Tuple[float, int]:
@@ -670,7 +636,7 @@ def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
         out.move("G00", r=R_s + 1, z=stock_front + s)
         for zf in passes_face:
             out.move("G00", z=zf)
-            out.move("G01", r=-0.8, post="F" + fmt(rough.f))
+            out.move("G01", r=-0.8, post="F" + out.pp.num(rough.f))
             out.move("G00", z=zf + 1)
             out.move("G00", r=R_s + 1)
         if levels:
@@ -681,7 +647,7 @@ def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
             z_end, j = _cross(pl, rk)
             if z_end < zs - TOL:
                 out.move("G00", r=rk)
-                out.move("G01", z=z_end, post="" if feed_set else "F" + fmt(rough.f))
+                out.move("G01", z=z_end, post="" if feed_set else "F" + out.pp.num(rough.f))
                 feed_set = True
                 cz, cr = z_end, rk
                 for m in range(j, len(pl)):
@@ -700,21 +666,22 @@ def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
                 out.move("G01", r=cr + 0.5, z=cz + 0.5)
                 out.move("G00", z=zs)
             r_prev = rk
-        _retract(out, teil)
+        _retract(out)
 
     # ---- Schlichten ----
     last = elems[-1]
     _turn_head(out, "FERTIGDREHEN", fine)
     res.arbeitsgaenge.append("Fertigdrehen T{}".format(fine.t))
     out.move("G00", r=first.r0, z=max(first.z0 + s, front + 1))
-    out.move("G01", z=first.z0, pre="G42", post="F" + fmt(fine.f))
+    out.move("G01", z=first.z0, pre="G42", post="F" + out.pp.num(fine.f))
     for e in elems:
         if e.arc:
-            out.move("G03" if e.ccw else "G02", r=e.r1, z=e.z1, post="CR=" + fmt(e.radius), radius=e.radius)
+            out.move("G03" if e.ccw else "G02", r=e.r1, z=e.z1, post=out.pp.kreis + out.pp.num(e.radius),
+                     radius=e.radius)
         else:
             out.move("G01", r=e.r1, z=e.z1)
     out.move("G01", r=max(R_s, last.r1) + 0.5)
-    _retract(out, teil, g40=True)
+    _retract(out, g40=True)
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +690,8 @@ def _turning(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
 
 
 class _MillOut:
-    def __init__(self) -> None:
+    def __init__(self, pp: Postprozessor) -> None:
+        self.pp = pp
         self.lines: List[str] = []
 
     def g(self, code: str, x: Optional[float] = None, y: Optional[float] = None, z: Optional[float] = None,
@@ -732,9 +700,9 @@ class _MillOut:
         words = [code]
         for name, v in (("X", x), ("Y", y), ("Z", z)):
             if v is not None:
-                words.append(name + fmt(v))
+                words.append(name + self.pp.num(v))
         if f is not None:
-            words.append("F" + fmt(f))
+            words.append("F" + self.pp.num(f))
         self.lines.append(" ".join(words))
 
 
@@ -822,13 +790,13 @@ def _nut_umriss(fr: Fraesung, rp: float, rt: float, z_front: float, run_out: boo
 
 
 def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeug, res: Ergebnis,
-                  deburr: bool) -> Optional[Tuple[str, str, List[str], str]]:
-    """Bewegungen je Winkellage. Ergebnis: (Titel, Ebene, Bewegungen, Rückzugsachse)."""
+                  deburr: bool, pp: Postprozessor) -> Optional[Tuple[str, str, List[str], str]]:
+    """Bewegungen je Winkellage. Ergebnis: (Titel, Werkzeuglage radial/axial, Bewegungen, Rückzugsachse)."""
     R_s = teil.rohteil_d / 2.0
     s = max(0.5, teil.sicherheit)
     label = "Fräsung {} ({})".format(nr, FEATURES.get(fr.art, fr.art))
     z_front = 0.0
-    m = _MillOut()
+    m = _MillOut(pp)
     c = fr.fase
     rad = w.dm / 2.0
 
@@ -860,7 +828,7 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                     res.errors.append(_cone_msg(label, w))
                     return None
                 _edge_path(m, pts, c, x_app, w.f)
-                return title, "G19", m.lines, "x"
+                return title, "radial", m.lines, "x"
             zc_min = z_lo + rad
             zc_max = max(zc_min, z_front + 1 - rad) if run_out else z_hi - rad
             if zc_max < zc_min - TOL:
@@ -882,7 +850,7 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                     side = -side
                     m.g("G01", y=side * y_out)
             m.g("G00", x=x_app)
-            return title, "G19", m.lines, "x"
+            return title, "radial", m.lines, "x"
 
         # Nut
         b, t = fr.mass, fr.tiefe
@@ -901,7 +869,7 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                 res.errors.append(_cone_msg(label, w))
                 return None
             _edge_path(m, pts, c, x_app, w.f)
-            return "ENTGRATEN NUT {}X{}".format(fmt(b), fmt(t)), "G19", m.lines, "x"
+            return "ENTGRATEN NUT {}X{}".format(fmt(b), fmt(t)), "radial", m.lines, "x"
         if w.dm > b + TOL:
             res.errors.append("{}: Fräser Ø{} ist breiter als die Nut ({}).".format(label, fmt(w.dm), fmt(b)))
             return None
@@ -930,7 +898,7 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                 at_start = not at_start
             order = list(reversed(order))
         m.g("G00", x=x_app)
-        return title, "G19", m.lines, "x"
+        return title, "radial", m.lines, "x"
 
     if fr.art == "bohrung_radial":
         d, t, zb = fr.mass, fr.tiefe, fr.z1
@@ -959,11 +927,11 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                 return None
             m.g("G01", x=2 * (rp - d / 2 - c), f=w.f)
             m.g("G00", x=x_app)
-            return "ENTGRATEN BOHRUNG D{}".format(fmt(d)), "G19", m.lines, "x"
+            return "ENTGRATEN BOHRUNG D{}".format(fmt(d)), "radial", m.lines, "x"
         if w.dm > 0 and abs(w.dm - d) > TOL:
             res.warnings.append("{}: Bohrer T{} hat Ø{}, die Bohrung Ø{}.".format(label, w.t, fmt(w.dm), fmt(d)))
         _peck(m, "x", x_app, [2 * v for v in _steps(rp, rp - t, w.ap if w.ap > TOL else t)], 1.0, w.f)
-        return "BOHREN D{} RADIAL".format(fmt(d)), "G19", m.lines, "x"
+        return "BOHREN D{} RADIAL".format(fmt(d)), "radial", m.lines, "x"
 
     if fr.art == "bohrung_axial":
         d, t, zf, lk = fr.mass, fr.tiefe, fr.z1, fr.teilkreis
@@ -997,11 +965,11 @@ def _feature_body(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeu
                 return None
             m.g("G01", z=zf - d / 2 - c, f=w.f)
             m.g("G00", z=zf + s)
-            return "ENTGRATEN STIRNBOHRUNG D{}".format(fmt(d)), "G17", m.lines, "z"
+            return "ENTGRATEN STIRNBOHRUNG D{}".format(fmt(d)), "axial", m.lines, "z"
         if w.dm > 0 and abs(w.dm - d) > TOL:
             res.warnings.append("{}: Bohrer T{} hat Ø{}, die Bohrung Ø{}.".format(label, w.t, fmt(w.dm), fmt(d)))
         _peck(m, "z", zf + s, _steps(zf, zf - t, w.ap if w.ap > TOL else t), 0.5, w.f)
-        return "BOHREN D{} STIRN".format(fmt(d)), "G17", m.lines, "z"
+        return "BOHREN D{} STIRN".format(fmt(d)), "axial", m.lines, "z"
 
     res.errors.append("{}: unbekannte Art „{}“.".format(label, fr.art))
     return None
@@ -1061,13 +1029,13 @@ def _peck(m: _MillOut, axis: str, safe: float, depths: List[float], back: float,
 
 
 def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
+    pp = out.pp
     ops: List[Tuple[int, Fraesung, bool]] = []
     for nr, fr in enumerate(teil.fraesungen, start=1):
         ops.append((nr, fr, False))
     for nr, fr in enumerate(teil.fraesungen, start=1):
         if fr.entgraten:
             ops.append((nr, fr, True))
-    n = teil.wz_spindel
     for nr, fr, deburr in ops:
         if not fr.winkel:
             res.errors.append("Fräsung {}: Winkel fehlt.".format(nr))
@@ -1085,43 +1053,46 @@ def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
         if w.ap <= TOL and not deburr and fr.art in ("flaeche", "nut"):
             res.errors.append("Fräsung {}: Zustellung (Tiefe je Schnitt) von T{} fehlt.".format(nr, w.t))
             continue
-        body = _feature_body(teil, geom, nr, fr, w, res, deburr)
+        body = _feature_body(teil, geom, nr, fr, w, res, deburr, pp)
         if body is None:
             continue
-        title, plane, lines, axis = body
+        title, lage, lines, axis = body
         winkel = "/".join(fmt(a) for a in fr.winkel)
+        add = out.lines.extend
         out.raw("")
         # Kommentar direkt über dem Werkzeug = Bearbeitung auf Einricht-/Korrekturblatt
-        out.raw(";" + nc_text("{} {}".format(title, w.name)))
-        out.raw(_tool_line(w, "G94 {} M8".format(plane)))
+        out.raw(pp.comment("{} {}".format(title, w.name)))
+        add(pp.tool_lines(w.t, w.d, pp.vorschub_min, pp.ebene_radial if lage == "radial" else pp.ebene_axial))
+        add(pp.fill(pp.spindel_aus))
+        add(pp.fill(pp.c_ein))
         for i, a in enumerate(fr.winkel):
-            if teil.loesen and i:
-                out.raw(teil.loesen)
-            out.raw(teil.spos.replace("{W}", fmt(a)))
-            if teil.klemmen:
-                out.raw(teil.klemmen)
+            if i:
+                add(pp.fill(pp.loesen))
+            add(pp.fill(pp.c_pos, W=a))
+            add(pp.fill(pp.klemmen))
             if i == 0:
-                out.raw("S{}={} M{}=3".format(n, fmt(w.s), n))
-            out.lines.extend(lines)
-        if teil.loesen:
-            out.raw(teil.loesen)
-        if axis == "x":
-            out.raw("G00 Y0")
-            out.raw("M{}=5".format(n))
-            out.raw("G00 X{}".format(fmt(teil.wechsel_x)))
-            out.raw("G00 Z{}".format(fmt(teil.wechsel_z)))
-        else:
-            out.raw("G00 Y0")
-            out.raw("M{}=5".format(n))
-            out.raw("G00 Z{}".format(fmt(teil.wechsel_z)))
-            out.raw("G00 X{}".format(fmt(teil.wechsel_x)))
-        out.raw("G18")
+                add(pp.fill(pp.awz_ein, S=w.s))
+            add(lines)
+        add(pp.fill(pp.loesen))
+        out.raw("G00 Y" + pp.num(0))
+        add(pp.fill(pp.awz_aus))
+        add(pp.fill(pp.kuehl_aus))
+        add(pp.fill(pp.c_aus))
+        x, z = "G00 X" + pp.num(pp.wechsel_x), "G00 Z" + pp.num(pp.wechsel_z)
+        add([x, z] if axis == "x" else [z, x])  # radial erst X weg, axial erst Z weg
+        add(pp.fill(pp.ebene_drehen))
         res.arbeitsgaenge.append("{}{} · T{} · C {}°".format(
             FEATURES.get(fr.art, fr.art), " entgraten" if deburr else "", w.t, winkel))
 
 
-def generate(teil: Teil, rahmen: bool = False) -> Ergebnis:
-    """Ganzes Programm erzeugen. ``rahmen``: mit Programmkopf (%_N_…_MPF) und M30."""
+def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = None,
+             maschine: str = "") -> Ergebnis:
+    """Ganzes Programm erzeugen.
+
+    ``rahmen``: mit Programmanfang/-ende aus dem Postprozessor (z. B. %_N_…_MPF … M30).
+    ``pp``: Postprozessor der Maschine (ohne Angabe: Sinumerik, angetriebenes Werkzeug S3/M3=).
+    """
+    pp = pp or Postprozessor()
     res = Ergebnis()
     geom = build_geometry(teil)
     res.errors.extend(geom.errors)
@@ -1132,17 +1103,18 @@ def generate(teil: Teil, rahmen: bool = False) -> Ergebnis:
         res.errors.append("Es ist nichts zu bearbeiten: alle Elemente stehen auf „Nicht drehen“ und es gibt "
                           "keine Fräsung.")
         return res
-    if not (0 < teil.wz_spindel < 10):
-        res.errors.append("Spindelnummer des angetriebenen Werkzeugs muss 1 … 9 sein.")
-    if teil.fraesungen and "{W}" not in teil.spos:
-        res.errors.append("In der Vorlage zum Spindel-Positionieren fehlt {W} für den Winkel.")
-    if teil.wechsel_x / 2.0 < teil.rohteil_d / 2.0 + 1:
-        res.errors.append("Werkzeugwechselpunkt X{} liegt nicht außerhalb des Rohteils.".format(fmt(teil.wechsel_x)))
-    if teil.wechsel_z < teil.planaufmass + 5:
-        res.errors.append("Werkzeugwechselpunkt Z{} liegt zu nah an der Stirnseite.".format(fmt(teil.wechsel_z)))
+    pp_err, pp_warn = pp.pruefen(mit_fraesen=bool(teil.fraesungen))
+    res.errors.extend(pp_err)
+    res.warnings.extend(pp_warn)
+    if pp.wechsel_x / 2.0 < teil.rohteil_d / 2.0 + 1:
+        res.errors.append("Werkzeugwechselpunkt X{} (Postprozessor) liegt nicht außerhalb des Rohteils.".format(
+            fmt(pp.wechsel_x)))
+    if pp.wechsel_z < teil.planaufmass + 5:
+        res.errors.append("Werkzeugwechselpunkt Z{} (Postprozessor) liegt zu nah an der Stirnseite.".format(
+            fmt(pp.wechsel_z)))
     if res.errors:
         return res
-    out = _Out()
+    out = _Out(pp)
     _turning(teil, geom, res, out)
     _milling(teil, geom, res, out)
     if res.errors:
@@ -1150,14 +1122,16 @@ def generate(teil: Teil, rahmen: bool = False) -> Ergebnis:
     name = nc_name(teil.name)
     head: List[str] = []
     if rahmen:
-        head += ["%_N_{}_MPF".format(name), ";$PATH=/_N_MPF_DIR"]
-    head += [";KONTUR-ASSISTENT  TEIL {}".format(name),
-             ";ROHTEIL D{}  NULLPUNKT MITTE STIRNSEITE Z0".format(fmt(teil.rohteil_d)),
-             ";VOR DEM ERSTEN LAUF SIMULIEREN UND PRUEFEN"]
+        head += pp.fill(pp.kopf, NAME=name, NR=program_number(teil.name))
+    head.append(pp.comment("KONTUR-ASSISTENT TEIL {}".format(name)))
+    if maschine:
+        head.append(pp.comment("MASCHINE {}".format(maschine)))
+    head += [pp.comment("ROHTEIL D{} NULLPUNKT MITTE STIRNSEITE Z0".format(fmt(teil.rohteil_d))),
+             pp.comment("VOR DEM ERSTEN LAUF SIMULIEREN UND PRUEFEN")]
     if rahmen:
-        head += ["G54 G90"]
+        head += pp.fill(pp.start)
     body = list(out.lines)
-    tail = ["", "M30"] if rahmen else []
+    tail = [""] + pp.fill(pp.ende) if rahmen else []
     res.code = "\n".join(head + body + tail) + "\n"
     res.moves = out.moves
     return res

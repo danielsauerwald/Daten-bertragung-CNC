@@ -551,6 +551,7 @@ def test_kontur_dialog_new_program_flow(app, monkeypatch):
     from cnc_dnc.kontur import Fraesung, neues_teil
     from cnc_dnc.kontur_dialog import KonturDialog
 
+    app.machine.control = "sinumerik"  # Postprozessor = Vorlage zur Steuerung
     seen = {}
 
     def fake_show(self):
@@ -617,6 +618,7 @@ def test_kontur_insert_at_cursor_and_errors(app, monkeypatch):
     from cnc_dnc.kontur import KPunkt
     from cnc_dnc.kontur_dialog import KonturDialog
 
+    app.machine.control = "sinumerik"
     app.editor.set_text("%_N_KANAL1_MPF\nG54\nM17\n")
     app.editor.text.mark_set("insert", "2.1")
     seen = {}
@@ -640,7 +642,7 @@ def test_kontur_insert_at_cursor_and_errors(app, monkeypatch):
     assert seen["err"].startswith("✕") and "Einstiche" in seen["err"] and seen["disabled"]
     assert seen["enabled"]
     lines = app.editor.get_text().split("\n")
-    assert lines[:3] == ["%_N_KANAL1_MPF", "G54", ";KONTUR-ASSISTENT  TEIL BEISPIEL"]
+    assert lines[:4] == ["%_N_KANAL1_MPF", "G54", ";KONTUR-ASSISTENT TEIL BEISPIEL", ";MASCHINE 78: EMCO - 2"]
     assert "M17" in lines and "M30" not in lines and app.dirty
     app.undo()
     app.root.update()
@@ -670,3 +672,106 @@ def test_kontur_feature_dialog_parses_input(app):
     dlg2.ok()
     assert dlg2.result is None and "Zahlen" in dlg2.msg.cget("text")
     dlg2.destroy()
+
+
+def test_kontur_uses_postprocessor_of_chosen_machine(app, monkeypatch):
+    """Fanuc-Maschine -> Fanuc-Code; Postprozessor im Assistenten ändern -> bei der Maschine gespeichert."""
+    from cnc_dnc.config import AppConfig, MachineProfile
+    from cnc_dnc.kontur_dialog import KonturDialog
+    from cnc_dnc.postpro import fuer_maschine, vorlage
+
+    emco = app.machine
+    emco.control = "sinumerik"
+    emco.post = vorlage("sin_s4").to_dict()
+    doosan = MachineProfile(number="5", name="Doosan", control="fanuc", port="COM9")
+    app.cfg.machines.append(doosan)
+    seen = {}
+
+    def fake_show(self):
+        self.update()
+        seen["start"] = (self.pp.awz_ein, "S4=3000 M4=3" in self.res.code)
+        seen["info"] = self.pp_info.cget("text")
+        # andere Maschine wählen -> Fanuc
+        self.machine_cb.set(doosan.display_name)
+        self._machine_selected()
+        self.refresh()
+        seen["fanuc"] = self.res.code
+        seen["head"] = self.head_sub.cget("text")
+        # Postprozessor anpassen (wie im Fenster „Postprozessor bearbeiten“)
+        pp = self.pp.copy()
+        pp.c_ein, pp.c_aus, pp.awz_ein, pp.awz_aus = "M35", "M34", "M23 S{S}", "M25"
+        self.set_postpro(pp)
+        self.refresh()
+        self.finish("neu")
+        return self.result
+
+    monkeypatch.setattr(KonturDialog, "show", fake_show)
+    app.kontur()
+    assert seen["start"] == ("S4={S} M4=3", True)
+    assert "S4=3000 M4=3" in seen["info"] and "SPOS=DC(90)" in seen["info"]
+    assert "(VORDREHEN VNMG08)\nT0101" in seen["fanuc"] and "G00 C180." in seen["fanuc"]
+    assert "Doosan" in seen["head"] and "Fanuc" in seen["head"]
+    text = app.editor.get_text()
+    assert text.startswith("%\nO1000 (BEISPIEL)\n") and "M35\nG00 C0.\nM23 S3000" in text and "M25" in text
+    # bei der Maschine gespeichert, Emco unverändert
+    saved = AppConfig.load(app.cfg.path)
+    assert fuer_maschine(saved.machine_by_id(doosan.id)).awz_ein == "M23 S{S}"
+    assert fuer_maschine(saved.machine_by_id(emco.id)).awz_ein == "S4={S} M4=3"
+
+
+def test_postpro_dialog_preview_presets_and_check(app, monkeypatch):
+    import cnc_dnc.postpro_dialog as pd
+    from cnc_dnc.postpro import vorlage
+    from cnc_dnc.postpro_dialog import PostproDialog
+
+    dlg = PostproDialog(app.root, app.fonts, "Doosan", vorlage("fanuc"))
+    dlg.update()
+    text = dlg.preview.get("1.0", "end")
+    assert "O1000 (BEISPIEL)" in text and "T0101" in text and "G00 C180." in text and "M13 S3000" in text
+    assert "C-Achse ein" in dlg.msg.cget("text")  # Hinweis: M-Befehl fehlt noch
+    # Vorlage Siemens S4 übernehmen
+    monkeypatch.setattr(pd.dialogs, "confirm", lambda *a, **k: True)
+    dlg.preset.set("Siemens Sinumerik – angetr. Werkzeug S4= / M4=")
+    dlg.load_preset()
+    dlg.update_view()
+    text = dlg.preview.get("1.0", "end")
+    assert "T01D1 G95 G18 S2300 M3 M8" in text and "S4=3000 M4=3" in text and "M4=5" in text
+    # fehlender Platzhalter -> Fehler, Speichern gesperrt
+    dlg.vars["c_pos"].set("SPOS=0")
+    dlg.update_view()
+    assert dlg.ok_btn.instate(["disabled"]) and "{W}" in dlg.msg.cget("text")
+    dlg.ok()
+    assert dlg.result is None
+    dlg.vars["c_pos"].set("SPOS[1]=DC({W})")
+    dlg.vars["wechsel_x"].set("200")
+    dlg.ok()
+    pp = dlg.result
+    assert pp.c_pos == "SPOS[1]=DC({W})" and pp.wechsel_x == 200 and pp.awz_ein == "S4={S} M4=3"
+
+
+def test_machine_edit_dialog_has_postprocessor_tab(app, monkeypatch):
+    from cnc_dnc.dialogs import MachineEditDialog
+    from cnc_dnc.postpro import fuer_maschine, vorlage
+    from cnc_dnc.postpro_dialog import PostproDialog
+
+    m = app.machine
+    m.control = "sinumerik"
+    dlg = MachineEditDialog(app.root, app.fonts, m)
+    assert "Vorlage zur Steuerung" in dlg.post_info.cget("text") and "S3=3000 M3=3" in dlg.post_info.cget("text")
+    # Steuerung umstellen -> Anzeige folgt der Vorlage
+    dlg.v["control"].set("Fanuc / ISO")
+    dlg._apply_control_preset()
+    assert "T0101" in dlg.post_info.cget("text")
+    dlg.v["control"].set("Siemens Sinumerik")
+    dlg._apply_control_preset()
+
+    def fake_show(self):
+        assert self.pp.art == "sinumerik"
+        return vorlage("sin_s4")
+
+    monkeypatch.setattr(PostproDialog, "show", fake_show)
+    dlg._edit_post()
+    assert "eigene Einstellung" in dlg.post_info.cget("text") and "S4=3000 M4=3" in dlg.post_info.cget("text")
+    dlg.save()
+    prof = dlg.result
+    assert fuer_maschine(prof).awz_ein == "S4={S} M4=3" and prof.id == m.id

@@ -1189,7 +1189,8 @@ class App:
         from .kontur_dialog import KonturDialog
 
         teil = load_teil(self._kontur_path())
-        res = KonturDialog(self.root, self.fonts, teil, control=self.machine.control).show()
+        res = KonturDialog(self.root, self.fonts, teil, machines=self.cfg.machines, machine_id=self.machine.id,
+                           on_machines_changed=self._save_config).show()
         try:
             save_teil(teil, self._kontur_path())  # Eingaben fürs nächste Mal merken
         except OSError:

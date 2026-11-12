@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -77,6 +78,8 @@ class MachineProfile:
     # Dateien
     folder: str = ""
     file_ext: str = ".nc"
+    # Postprozessor für den Kontur-Assistenten (G-/M-Befehle, siehe postpro.py); leer = Vorlage zur Steuerung
+    post: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def display_name(self) -> str:
@@ -105,7 +108,7 @@ class MachineProfile:
         return os.path.join(default_program_root(), safe_filename(self.display_name) or "Maschine")
 
     def copy(self) -> "MachineProfile":
-        data = asdict(self)
+        data = copy.deepcopy(asdict(self))
         data["id"] = uuid.uuid4().hex[:12]
         return MachineProfile(**data)
 
@@ -147,6 +150,8 @@ class MachineProfile:
             self.id = uuid.uuid4().hex[:12]
         if self.file_ext and not self.file_ext.startswith("."):
             self.file_ext = "." + self.file_ext
+        if not isinstance(self.post, dict):
+            self.post = {}
 
 
 def default_machines() -> List[MachineProfile]:

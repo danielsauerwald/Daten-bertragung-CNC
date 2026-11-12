@@ -35,6 +35,7 @@ from .kontur import (
     polyline,
     winkel_text,
 )
+from .postpro import ARTEN, Postprozessor, fuer_maschine
 from .system import IS_WIN, toggle_touch_keyboard
 from .theme import C, MONO_FAMILY, Fonts, px
 
@@ -268,9 +269,17 @@ class KonturDialog(Dialog):
 
     closes_keyboard = True
 
-    def __init__(self, parent, fonts: Fonts, teil: Teil, control: str = "sinumerik") -> None:
+    def __init__(self, parent, fonts: Fonts, teil: Teil, machines: Optional[list] = None, machine_id: str = "",
+                 on_machines_changed=None) -> None:
+        """``machines``: Maschinenliste (MachineProfile) – deren Postprozessoren werden benutzt und beim
+        Bearbeiten gespeichert (``on_machines_changed``)."""
         super().__init__(parent, fonts, "Kontur → CNC-Code")
         self.teil = teil  # wird direkt bearbeitet; der Aufrufer speichert es danach
+        self.machines = list(machines or [])
+        self.on_machines_changed = on_machines_changed
+        self.machine = next((m for m in self.machines if m.id == machine_id), None) or \
+            (self.machines[0] if self.machines else None)
+        self.pp: Postprozessor = fuer_maschine(self.machine) if self.machine else Postprozessor()
         self.sel: Optional[Tuple[str, int]] = None  # ("seg"|"corner"|"feat", Nummer)
         self.geom: Geometrie = build_geometry(teil)
         self.res: Ergebnis = Ergebnis()
@@ -283,7 +292,7 @@ class KonturDialog(Dialog):
 
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
-        self._build_head(control)
+        self._build_head()
         main = tk.Frame(self, bg=C["bg"])
         main.grid(row=1, column=0, sticky="nsew", padx=px(self, 12))
         main.grid_rowconfigure(0, weight=1)
@@ -317,16 +326,13 @@ class KonturDialog(Dialog):
 
     # ------------------------------------------------------------------ Aufbau
 
-    def _build_head(self, control: str) -> None:
+    def _build_head(self) -> None:
         bg = C["bg"]
         head = tk.Frame(self, bg=bg)
         head.grid(row=0, column=0, sticky="ew", padx=px(self, 16), pady=(px(self, 10), px(self, 6)))
         tk.Label(head, text="Kontur → CNC-Code", bg=bg, fg=C["text"], font=self.fonts.title).pack(side="left")
-        sub = "Kontur eingeben · Element in der Zeichnung antippen · Drehen, Fräsen oder Entgraten wählen"
-        if control != "sinumerik":
-            sub = "Achtung: Der Code wird im Sinumerik-Format erzeugt, die Maschine ist anders eingestellt."
-        tk.Label(head, text=sub, bg=bg, fg=C["warn"] if control != "sinumerik" else C["muted"],
-                 font=self.fonts.small).pack(side="left", padx=(px(self, 14), 0))
+        self.head_sub = tk.Label(head, text="", bg=bg, fg=C["muted"], font=self.fonts.small)
+        self.head_sub.pack(side="left", padx=(px(self, 14), 0))
         ttk.Button(head, text="Beispiel", style="Small.TButton", command=self.load_example).pack(side="right")
         ttk.Button(head, text="Neu …", style="Small.TButton", command=self.new_part).pack(
             side="right", padx=(0, px(self, 8)))
@@ -376,7 +382,7 @@ class KonturDialog(Dialog):
         self._tab_kontur()
         self._tab_fraesen()
         self._tab_werkzeuge()
-        self._tab_maschine()
+        self._tab_postpro()
         self._tab_code()
         self.nb.bind("<<NotebookTabChanged>>", lambda e: (self._show_code(), self.redraw()))
 
@@ -481,24 +487,91 @@ class KonturDialog(Dialog):
                          "Y-Achse) oder axial (Stirnseite).", bg=C["surface"], fg=C["muted"], font=self.fonts.small,
                  wraplength=px(self, 460), justify="left", anchor="w").pack(fill="x", pady=(px(self, 8), 0))
 
-    def _tab_maschine(self) -> None:
-        f = self._tab("Maschine")
+    def _tab_postpro(self) -> None:
+        f = self._tab("Postprozessor")
+        top = tk.Frame(f, bg=C["surface"])
+        top.pack(fill="x")
+        tk.Label(top, text="Maschine", bg=C["surface"], font=self.fonts.ui).pack(side="left")
+        self.machine_cb = ttk.Combobox(top, state="readonly", width=26, font=self.fonts.ui,
+                                       values=[m.display_name for m in self.machines])
+        if self.machine is not None:
+            self.machine_cb.set(self.machine.display_name)
+        self.machine_cb.pack(side="left", padx=(px(self, 8), 0))
+        self.machine_cb.bind("<<ComboboxSelected>>", lambda e: self._machine_selected())
+        self.pp_info = tk.Label(f, text="", bg=C["surface_alt"], fg=C["text"], font=(MONO_FAMILY, 10),
+                                anchor="nw", justify="left", padx=px(self, 8), pady=px(self, 6))
+        self.pp_info.pack(fill="x", pady=(px(self, 8), px(self, 6)))
+        ttk.Button(f, text="Postprozessor bearbeiten …", command=self.edit_postpro).pack(anchor="w")
         g = tk.Frame(f, bg=C["surface"])
-        g.pack(fill="x")
-        self._field(g, "wechsel_x", "Werkzeugwechsel X", 7, row=0)
-        self._field(g, "wechsel_z", "Z", 7, col=2, row=0)
-        self._field(g, "sicherheit", "Sicherheitsabstand", 7, row=1)
-        self._field(g, "spos", "Spindel positionieren", 16, row=2, conv=str)
-        self._field(g, "wz_spindel", "Spindel angetr. WZ", 4, row=3, conv=int)
-        self._field(g, "klemmen", "Klemmen (M-Befehl)", 10, row=4, conv=str)
-        self._field(g, "loesen", "Lösen (M-Befehl)", 10, row=5, conv=str)
-        tk.Label(f, text="Der Code wird im Format Siemens Sinumerik erzeugt, im Stil der vorhandenen Programme: "
-                         "Kommentar über dem Werkzeug, T01D1 G95 G18 S… M3 M8. Fräsen: Hauptspindel mit "
-                         "SPOS=DC(Winkel) positionieren ({W} = Winkel), angetriebenes Werkzeug S3=… M3=3, "
-                         "Vorschub G94, Ebene G19 (radial) bzw. G17 (axial).\n\nDie Werte gelten für alle Teile und "
-                         "werden gemerkt. Bitte jedes neue Programm zuerst simulieren bzw. mit Vorschub-Override "
-                         "vorsichtig einfahren.", bg=C["surface"], fg=C["muted"], font=self.fonts.small,
-                 wraplength=px(self, 460), justify="left", anchor="w").pack(fill="x", pady=(px(self, 10), 0))
+        g.pack(fill="x", pady=(px(self, 10), 0))
+        self._field(g, "sicherheit", "Sicherheitsabstand (mm)", 6, row=0)
+        tk.Label(f, text="Der Postprozessor gehört zur Maschine (auch unter ⚙ Maschinen → Bearbeiten → "
+                         "Postprozessor): Werkzeugaufruf, M-Befehle für Spindel, Kühlmittel, angetriebenes Werkzeug "
+                         "(z. B. S3=/M3= oder S4=/M4=), C-Achse und Klemmung, Ebenen, Vorschubart, Programmanfang "
+                         "und -ende, Werkzeugwechselpunkt.\n\nBitte jedes neue Programm zuerst simulieren bzw. mit "
+                         "Vorschub-Override vorsichtig einfahren.", bg=C["surface"], fg=C["muted"],
+                 font=self.fonts.small, wraplength=px(self, 460), justify="left", anchor="w").pack(
+            fill="x", pady=(px(self, 10), 0))
+        self._update_pp_info()
+
+    def _update_pp_info(self) -> None:
+        pp = self.pp
+        dash = "–"
+
+        def one(template: str, **kw) -> str:
+            return " / ".join(pp.fill(template, **kw)) or dash
+
+        rows = [
+            ("Format", ARTEN.get(pp.art, pp.art)),
+            ("Drehen", " / ".join(pp.tool_lines(1, 1, pp.vorschub_u, pp.ebene_drehen, 2300))),
+            ("Positionieren", one(pp.c_pos, W=90)),
+            ("Angetr. WZ", "{}  …  {}".format(one(pp.awz_ein, S=3000), one(pp.awz_aus))),
+            ("C-Achse", "ein {}  ·  aus {}".format(one(pp.c_ein), one(pp.c_aus))),
+            ("Klemmen", "{}  ·  lösen {}".format(one(pp.klemmen), one(pp.loesen))),
+            ("Wechselpunkt", "X{} Z{}".format(pp.num(pp.wechsel_x), pp.num(pp.wechsel_z))),
+        ]
+        self.pp_info.configure(text="\n".join("{:<15}{}".format(a + ":", b) for a, b in rows))
+        name = self.machine.display_name if self.machine is not None else "ohne Maschine"
+        control = getattr(self.machine, "control", "")
+        if control in ("heidenhain", "generic"):
+            self.head_sub.configure(fg=C["warn"], text="Achtung: Maschine „{}“ – Code im Format {} laut "
+                                    "Postprozessor.".format(name, ARTEN.get(pp.art, pp.art)))
+        else:
+            self.head_sub.configure(fg=C["muted"], text="Für {} ({}) · Element antippen · Drehen, Fräsen oder "
+                                    "Entgraten wählen".format(name, ARTEN.get(pp.art, pp.art)))
+
+    def select_machine(self, machine) -> None:
+        self.machine = machine
+        self.pp = fuer_maschine(machine)
+        if hasattr(self, "machine_cb"):
+            self.machine_cb.set(machine.display_name)
+        self._update_pp_info()
+        self.changed()
+
+    def _machine_selected(self) -> None:
+        names = [m.display_name for m in self.machines]
+        name = self.machine_cb.get()
+        if name in names:
+            self.select_machine(self.machines[names.index(name)])
+
+    def edit_postpro(self) -> None:
+        from .postpro_dialog import PostproDialog
+
+        name = self.machine.display_name if self.machine is not None else "Kontur-Assistent"
+        res = PostproDialog(self, self.fonts, name, self.pp).show()
+        if res is None:
+            return
+        self.set_postpro(res)
+
+    def set_postpro(self, pp: Postprozessor) -> None:
+        """Neuen Postprozessor übernehmen und bei der Maschine speichern."""
+        self.pp = pp
+        if self.machine is not None:
+            self.machine.post = pp.to_dict()
+            if self.on_machines_changed is not None:
+                self.on_machines_changed()
+        self._update_pp_info()
+        self.changed()
 
     def _tab_code(self) -> None:
         f = self._tab("Code")
@@ -515,8 +588,9 @@ class KonturDialog(Dialog):
                                  relief="flat", highlightthickness=1, highlightbackground=C["border"])
         sb = ttk.Scrollbar(box, orient="vertical", command=self.code_text.yview)
         self.code_text.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")  # zuerst, sonst nimmt das Textfeld die ganze Breite
+        self.code_text.configure(width=20)
         self.code_text.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
         self.code_text.configure(state="disabled")
 
     def _build_bottom(self) -> None:
@@ -589,7 +663,7 @@ class KonturDialog(Dialog):
     def refresh(self) -> None:
         self._job = None
         self.geom = build_geometry(self.teil)
-        self.res = generate(self.teil, rahmen=True)
+        self.res = generate(self.teil, rahmen=True, pp=self.pp, maschine=self._machine_name())
         self._fill_lists()
         self._update_selection()
         self.redraw()
@@ -647,7 +721,8 @@ class KonturDialog(Dialog):
             self.code_text.insert("1.0", res.code)
             n = res.code.count("\n")
             info = "Arbeitsgänge: " + ", ".join(res.arbeitsgaenge) + "\n{} Zeilen.  „Als neues Programm“ mit " \
-                   "Kopf %_N_…_MPF und M30, „Am Cursor einfügen“ nur die Arbeitsgänge.".format(n)
+                   "Programmanfang und -ende laut Postprozessor, „Am Cursor einfügen“ nur die Arbeitsgänge." \
+                .format(n)
             if res.warnings:
                 info += "\n" + "\n".join("! " + w for w in res.warnings)
             self.code_info.configure(text=info)
@@ -657,7 +732,7 @@ class KonturDialog(Dialog):
         if self._job is not None:
             self.after_cancel(self._job)
             self.refresh()
-        res = generate(self.teil, rahmen=(mode == "neu"))
+        res = generate(self.teil, rahmen=(mode == "neu"), pp=self.pp, maschine=self._machine_name())
         if res.errors:
             dialogs.error(self, self.fonts, "Code kann noch nicht erzeugt werden", res.errors[0],
                           detail="\n".join(res.errors[1:4]))
@@ -665,9 +740,12 @@ class KonturDialog(Dialog):
         self.result = (mode, res.code)
         self.destroy()
 
+    def _machine_name(self) -> str:
+        return self.machine.display_name if self.machine is not None else ""
+
     def new_part(self) -> None:
         if not dialogs.confirm(self, self.fonts, "Neues Teil", "Kontur und Fräsungen löschen? Werkzeuge und "
-                               "Maschinenwerte bleiben.", yes="Neu"):
+                               "Postprozessor bleiben.", yes="Neu"):
             return
         self._replace_part(neues_teil(), keep_tools=True)
 
@@ -682,7 +760,7 @@ class KonturDialog(Dialog):
         old = self.teil
         if keep_tools:
             for attr in ("werkzeuge", "wz_schruppen", "wz_schlichten", "aufmass_x", "aufmass_z", "kante",
-                         "wechsel_x", "wechsel_z", "sicherheit", "spos", "wz_spindel", "klemmen", "loesen"):
+                         "sicherheit"):
                 setattr(new, attr, getattr(old, attr))
         self.teil.__dict__.update(new.__dict__)
         self.sel = None
