@@ -1056,3 +1056,179 @@ def test_tool_dialog_boring_bars_and_center_drill(app):
     dlg.ok()
     assert (dlg.result.lage, dlg.result.dm) == ("mitte", 20)
     dlg.destroy()
+
+
+def test_postpro_from_images_suggestions_and_code_list(app, monkeypatch):
+    from cnc_dnc import ki, ki_dialog
+    from cnc_dnc.dialogs import MachineEditDialog
+    from cnc_dnc.postpro import vorlage
+    from cnc_dnc.postpro_dialog import PostproDialog
+
+    m = app.machine
+    erg = ki.postpro_auswerten({
+        "steuerung": "Fanuc 0i",
+        "codes": [{"code": "M34", "bedeutung": "C-Achse ein"}, {"code": "M35", "bedeutung": "C-Achse aus"},
+                  {"code": "M68", "bedeutung": "Klemmung"}],
+        "vorschlaege": [{"feld": "c_ein", "wert": "M34", "begruendung": "M34", "sicher": True},
+                        {"feld": "c_aus", "wert": "M35", "begruendung": "M35", "sicher": True},
+                        {"feld": "klemmen", "wert": "M68", "begruendung": "vermutlich", "sicher": False}],
+        "hinweise": []}, vorlage("fanuc"))
+    gerufen = {}
+
+    def fake_lesen(parent, fonts, pp, steuerung, machine_id):
+        gerufen.update(steuerung=steuerung, machine_id=machine_id)
+        return erg, ["codes_1.jpg"]
+
+    monkeypatch.setattr(ki_dialog, "postpro_lesen", fake_lesen)
+    # Prüffenster: sichere Vorschläge sind an, der unsichere aus; antippen schaltet um
+    seen = {}
+
+    def fake_show(self):
+        seen["an"] = sorted(k for k, v in self.wahl.items() if v)
+        self.umschalten("klemmen")
+        seen["text"] = self.info.cget("text")
+        self.ok()
+        return self.result
+
+    monkeypatch.setattr(ki_dialog.VorschlagDialog, "show", fake_show)
+    dlg = PostproDialog(app.root, app.fonts, "Doosan", vorlage("fanuc"), machine_id=m.id, steuerung="Fanuc / ISO")
+    assert dlg.codes_btn.instate(["disabled"])
+    dlg.aus_bildern()
+    assert gerufen == {"steuerung": "Fanuc / ISO", "machine_id": m.id}
+    assert seen["an"] == ["c_aus", "c_ein"] and seen["text"].startswith("3 von 3")
+    assert (dlg.vars["c_ein"].get(), dlg.vars["c_aus"].get(), dlg.vars["klemmen"].get()) == ("M34", "M35", "M68")
+    assert [c["code"] for c in dlg.codes] == ["M34", "M35", "M68"] and dlg.bilder == ["codes_1.jpg"]
+    dlg.update_view()
+    assert "3 Feld(er) aus den Bildern" in dlg.msg.cget("text")
+    assert dlg.codes_btn.cget("text") == "Code-Liste (3) …" and dlg.codes_btn.instate(["!disabled"])
+    dlg.ok()
+    assert dlg.result.c_ein == "M34"
+
+    # im Maschinen-Fenster landen Code-Liste und Bilder beim Speichern in der Maschine
+    class FakePP:
+        def __init__(self, *a, **kw):
+            self.kw = kw
+            self.codes = [{"code": "M13", "bedeutung": "AWZ"}]
+            self.bilder = ["b.jpg"]
+
+        def show(self):
+            return vorlage("fanuc")
+
+    monkeypatch.setattr("cnc_dnc.postpro_dialog.PostproDialog", FakePP)
+    m.zyklen = [{"name": "G83", "vorlage": "G83 Z{Z}", "parameter": [{"name": "Z"}]}]
+    med = MachineEditDialog(app.root, app.fonts, m)
+    med._edit_post()
+    med.save()
+    res = med.result
+    assert res.codes == [{"code": "M13", "bedeutung": "AWZ"}] and res.bilder == ["b.jpg"]
+    assert res.zyklen == m.zyklen  # Zyklen gehen beim Speichern nicht verloren
+
+
+def test_codes_are_merged():
+    from cnc_dnc.ki_dialog import codes_zusammenfuehren
+
+    alt = [{"code": "M13", "bedeutung": "alt"}, {"code": "M15", "bedeutung": "Halt"}]
+    neu = [{"code": "m13", "bedeutung": "AWZ rechts"}, {"code": "M34", "bedeutung": "C ein"}]
+    assert codes_zusammenfuehren(alt, neu) == [{"code": "M13", "bedeutung": "AWZ rechts"},
+                                               {"code": "M15", "bedeutung": "Halt"},
+                                               {"code": "M34", "bedeutung": "C ein"}]
+
+
+def test_cycles_dialog_from_image_fill_and_insert(app, monkeypatch):
+    from cnc_dnc import ki, ki_dialog
+    from cnc_dnc import zyklus_dialog as zd
+    from cnc_dnc.zyklen import Zyklus, ZParam
+
+    m = app.machine
+    m.zyklen = []
+    gelesen = Zyklus("CYCLE83", "Tieflochbohren", vorlage="CYCLE83({RTP},{RFP},{SDIS},{DP})",
+                     parameter=[ZParam("RTP", "Rückzug", "mm", "", True), ZParam("RFP", "Referenz", "mm", "0"),
+                                ZParam("SDIS", "Sicherheit", "mm", "2"), ZParam("DP", "Tiefe", "mm", "", True)],
+                     hinweise=["Bild etwas unscharf"])
+    gelesen.werte = {"RFP": "0", "SDIS": "2"}
+    monkeypatch.setattr(ki_dialog, "bereit", lambda *a: True)
+    monkeypatch.setattr(ki_dialog, "bilder_waehlen", lambda *a: ["/tmp/zyklus.jpg"])
+    monkeypatch.setattr(ki_dialog, "lesen", lambda parent, fonts, titel, text, arbeit: gelesen)
+    geprueft = {}
+
+    def fake_edit_show(self):
+        geprueft["titel"] = self.title()
+        geprueft["vorlage"] = self.vorlage.get("1.0", "end").strip()
+        self.ok()
+        return self.result
+
+    monkeypatch.setattr(zd.ZyklusEditDialog, "show", fake_edit_show)
+    gespeichert = []
+    dlg = zd.ZyklusDialog(app.root, app.fonts, m, on_changed=lambda: gespeichert.append(1))
+    assert dlg.aktiv is None and "Noch kein Zyklus" in dlg.titel.cget("text")
+    dlg.aus_bild()
+    assert geprueft["titel"] == "Gelesenen Zyklus prüfen" and geprueft["vorlage"].startswith("CYCLE83(")
+    assert len(m.zyklen) == 1 and gespeichert and dlg.aktiv is not None
+    assert "! Bild etwas unscharf" in dlg.hinweis.cget("text")
+    assert set(dlg.vars) == {"RTP", "RFP", "SDIS", "DP"} and dlg.vars["SDIS"].get() == "2"
+    assert dlg.ins_btn.instate(["disabled"]) and "RTP" in dlg.msg.cget("text")
+    dlg.vars["RTP"].set("10")
+    dlg.vars["DP"].set("-25,5")
+    assert dlg.ins_btn.instate(["!disabled"])
+    assert dlg.vorschau.get("1.0", "end").strip() == "CYCLE83(10,0,2,-25.5)"
+    dlg.einfuegen()
+    assert dlg.result == "CYCLE83(10,0,2,-25.5)"
+    assert m.zyklen[0]["werte"]["DP"] == "-25,5"  # Werte fürs nächste Mal gemerkt
+
+    # Hauptfenster: Taste „Zyklen“ fügt den Text am Cursor ein
+    monkeypatch.setattr(zd.ZyklusDialog, "show", lambda self: "CYCLE83(10,0,2,-25.5)")
+    app.editor.set_text("N10 G0 X0\nN20 M30\n")
+    app.editor.text.mark_set("insert", "1.end")
+    app.zyklen()
+    assert app.editor.get_text().startswith("N10 G0 X0\nCYCLE83(10,0,2,-25.5)\n")
+
+
+def test_cycle_edit_dialog_and_delete(app, monkeypatch):
+    from cnc_dnc import zyklus_dialog as zd
+    from cnc_dnc.zyklen import Zyklus, ZParam
+
+    z = Zyklus("G83", vorlage="G83 Z{Z} Q{Q}|G80", parameter=[ZParam("Z", "Tiefe", "mm", "", True), ZParam("Q")])
+    ed = zd.ZyklusEditDialog(app.root, app.fonts, z, "Zyklus bearbeiten")
+    assert ed.vorlage.get("1.0", "end").strip() == "G83 Z{Z} Q{Q}\nG80"  # eine Zeile je Satz
+    ed.params.insert("end", "\nF; Vorschub; mm/U; 0.1; nein")
+    ed.vorlage.delete("1.0", "end")
+    ed.vorlage.insert("1.0", "G83 Z{Z} Q{Q} F{F}\nG80")
+    ed.ok()
+    neu = ed.result
+    assert neu.vorlage == "G83 Z{Z} Q{Q} F{F}|G80" and [p.name for p in neu.parameter] == ["Z", "Q", "F"]
+    ed = zd.ZyklusEditDialog(app.root, app.fonts, z, "x")
+    ed.vorlage.delete("1.0", "end")
+    ed.vorlage.insert("1.0", "G83 Z{Z} R{R}")
+    ed.ok()
+    assert ed.result is None and "{R}" in ed.msg.cget("text")
+    ed.destroy()
+
+    m = app.machine
+    m.zyklen = [z.to_dict()]
+    monkeypatch.setattr(zd.dialogs, "confirm", lambda *a, **k: True)
+    dlg = zd.ZyklusDialog(app.root, app.fonts, m)
+    assert dlg.aktiv is not None and dlg.aktiv.name == "G83"
+    dlg.loeschen()
+    assert m.zyklen == [] and dlg.aktiv is None
+    dlg.destroy()
+
+
+def test_image_reading_needs_pc_version_and_key(app, monkeypatch):
+    from cnc_dnc import ki, ki_dialog
+
+    infos = []
+    monkeypatch.setattr(ki_dialog.dialogs, "info", lambda *a, **k: infos.append(a[3]))
+    monkeypatch.setattr(ki, "verfuegbar", lambda: (False, "nur PC"))
+    assert not ki_dialog.bereit(app.root, app.fonts) and infos == ["nur PC"]
+    monkeypatch.setattr(ki, "verfuegbar", lambda: (True, ""))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    app.cfg.ki_schluessel = ""
+
+    def fake_show(self):
+        self.var.set("sk-ant-test")
+        self.ok()
+        return self.result
+
+    monkeypatch.setattr(ki_dialog.SchluesselDialog, "show", fake_show)
+    assert ki_dialog.bereit(app.root, app.fonts) and app.cfg.ki_schluessel == "sk-ant-test"
+    assert ki_dialog.bereit(app.root, app.fonts)  # Schlüssel da: keine Rückfrage mehr

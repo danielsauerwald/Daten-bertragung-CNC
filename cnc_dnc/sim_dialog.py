@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 import tkinter as tk
 from tkinter import ttk
 from typing import List, Optional, Tuple
@@ -13,7 +14,11 @@ from .kontur import FEATURES, STRATEGIEN, Ergebnis, Teil, strategie
 from .simulation import DrehSimulation, Ereignis
 from .theme import C, MONO_FAMILY, Fonts, px
 
-TEMPI = [1, 2, 5, 10, 25, 100]  # Schritte je Bild
+# Abspielen nach Zeit: Bahn in mm je Sekunde (Eilgang schneller), etwa 60 Bilder je Sekunde
+TEMPO_MM_S = [2, 5, 10, 25, 50, 100, 250, 1000]
+TEMPO_START = 3
+EILGANG_FAKTOR = 5.0
+BILD_MS = 16
 PLATTE_FARBE = "#E8B923"
 HALTER_FARBE = "#8D99A6"
 MATERIAL = "#D7DEE8"
@@ -65,6 +70,29 @@ class Ablauf:
     def bis_ende(self) -> None:
         self.weiter(self.n + 1)
 
+    def _naechster(self):
+        """Nächster Schritt (Drehen bzw. Fräsen) oder None am Ende."""
+        if self.dreh is not None and not self.dreh.fertig and self.dreh.i < len(self.dreh.schritte):
+            return self.dreh.schritte[self.dreh.i]
+        if self.fraes is not None and not self.fraes.fertig and self.fraes.i < len(self.fraes.schritte):
+            return self.fraes.schritte[self.fraes.i]
+        return None
+
+    def weiter_strecke(self, mm: float) -> float:
+        """So viele Schritte, wie in ``mm`` Bahn passen (Eilgang zählt 1/EILGANG_FAKTOR).
+        Ergebnis: nicht verbrauchter Rest (für das nächste Bild)."""
+        while not self.fertig:
+            st = self._naechster()
+            if st is None:
+                self.weiter(1)  # Abschluss (Restmaterial) rechnen
+                break
+            kosten = st.laenge / (EILGANG_FAKTOR if st.eil else 1.0)
+            if kosten > mm:
+                return mm
+            mm -= kosten
+            self.weiter(1)
+        return 0.0
+
     def gehe_zu(self, idx: int) -> None:
         if idx <= self.n_dreh:
             if self.fraes is not None:
@@ -114,6 +142,11 @@ class SimulationDialog(Dialog):
         self.fs = self.ab.fraes
         self._job: Optional[str] = None
         self._spielt = False
+        self._t_last = 0.0
+        self._guthaben = 0.0  # noch nicht verbrauchte Bahn in mm
+        self._bild_zeit = 0.0
+        self._bahn_item: Optional[int] = None
+        self._bahn_move: Optional[Tuple[int, bool]] = None
         self._trace_bis = 0
         self._markiert: set = set()
         self._modus = ""
@@ -191,9 +224,12 @@ class SimulationDialog(Dialog):
             ttk.Button(bar, text="Zum Fräsen", style="Small.TButton", command=self.zum_fraesen).pack(
                 side="left", padx=(px(self, 6), 0))
         tk.Label(bar, text="Tempo", bg=bg, fg=C["muted"], font=fonts.ui).pack(side="left", padx=(px(self, 12), 4))
-        self._tempo = tk.DoubleVar(master=self, value=3)
-        ttk.Scale(bar, from_=0, to=len(TEMPI) - 1, orient="horizontal", length=px(self, 110),
-                  variable=self._tempo).pack(side="left")
+        self._tempo = tk.DoubleVar(master=self, value=TEMPO_START)
+        ttk.Scale(bar, from_=0, to=len(TEMPO_MM_S) - 1, orient="horizontal", length=px(self, 130),
+                  variable=self._tempo, command=lambda _v: self._tempo_text()).pack(side="left")
+        self.tempo_lbl = tk.Label(bar, text="", bg=bg, fg=C["muted"], font=fonts.small, width=9, anchor="w")
+        self.tempo_lbl.pack(side="left", padx=(px(self, 6), 0))
+        self._tempo_text()
         self.zeige_halter = tk.BooleanVar(master=self, value=True)
         self.zeige_bahn = tk.BooleanVar(master=self, value=True)
         self.lupe = tk.BooleanVar(master=self, value=False)
@@ -235,6 +271,12 @@ class SimulationDialog(Dialog):
         if hasattr(self, "btn_play"):
             self.btn_play.configure(text="▶  Abspielen")
 
+    def mm_je_s(self) -> float:
+        return float(TEMPO_MM_S[max(0, min(len(TEMPO_MM_S) - 1, int(round(self._tempo.get()))))])
+
+    def _tempo_text(self) -> None:
+        self.tempo_lbl.configure(text="{:g} mm/s".format(self.mm_je_s()))
+
     def spielen(self) -> None:
         if self._spielt:
             self._stop()
@@ -243,18 +285,27 @@ class SimulationDialog(Dialog):
             self.anfang()
         self._spielt = True
         self.btn_play.configure(text="❚❚  Pause")
+        self._t_last = time.perf_counter() - BILD_MS / 1000.0  # erstes Bild bewegt schon
+        self._guthaben = 0.0
         self._tick()
 
     def _tick(self) -> None:
+        """Ein Bild: so viel Bahn abfahren, wie seit dem letzten Bild bei gewähltem Tempo vergangen ist."""
         self._job = None
         if not self._spielt:
             return
-        self.ab.weiter(TEMPI[max(0, min(len(TEMPI) - 1, int(round(self._tempo.get()))))])
+        now = time.perf_counter()
+        dt = min(0.25, max(0.0, now - self._t_last))  # nach einer Pause nicht nachholen
+        self._t_last = now
+        self._guthaben = self.ab.weiter_strecke(self._guthaben + dt * self.mm_je_s())
         self._aktualisieren()
         if self.ab.fertig:
             self._stop()
+            self._aktualisieren()
             return
-        self._job = self.after(30, self._tick)
+        # Rechenzeit abziehen, damit es bei ~60 Bildern je Sekunde bleibt
+        rest = BILD_MS - int((time.perf_counter() - now) * 1000)
+        self._job = self.after(max(1, rest), self._tick)
 
     def schritt(self, n: int = 1) -> None:
         self._stop()
@@ -468,20 +519,35 @@ class SimulationDialog(Dialog):
         cv.tag_raise(self.tip_item)
 
     def _bahn(self) -> None:
+        """Werkzeugbahn nachziehen: eine Linie je NC-Satz (nicht je Schritt – bleibt auch lang flüssig)."""
+        cv = self.cv
         if not self.zeige_bahn.get():
-            self.cv.delete("bahn")
+            cv.delete("bahn")
             self._trace_bis = 0
+            self._bahn_item = self._bahn_move = None
             return
+        if self._trace_bis == 0:
+            self._bahn_item = self._bahn_move = None
         sim = self.sim
+        neu: List[float] = []
         for k in range(self._trace_bis, min(sim.i, len(sim.schritte))):
             st = sim.schritte[k]
             f = sim.formen[st.t]
-            a = self.P(st.a[0] + f.off[0], st.a[1] + f.off[1])
             b = self.P(st.b[0] + f.off[0], st.b[1] + f.off[1])
-            self.cv.create_line(*a, *b, fill=BAHN_G0 if st.eil else BAHN_G1, width=1,
-                                dash=(3, 3) if st.eil else (), tags=("bahn",))
+            if self._bahn_move == (st.move, st.eil) and self._bahn_item is not None:
+                neu.extend(b)
+                continue
+            if neu and self._bahn_item is not None:
+                cv.coords(self._bahn_item, *(cv.coords(self._bahn_item) + neu))
+                neu = []
+            a = self.P(st.a[0] + f.off[0], st.a[1] + f.off[1])
+            self._bahn_item = cv.create_line(*a, *b, fill=BAHN_G0 if st.eil else BAHN_G1, width=1,
+                                             dash=(3, 3) if st.eil else (), tags=("bahn",))
+            self._bahn_move = (st.move, st.eil)
+        if neu and self._bahn_item is not None:
+            cv.coords(self._bahn_item, *(cv.coords(self._bahn_item) + neu))
         self._trace_bis = sim.i
-        self.cv.tag_lower("bahn", self.halter_item)
+        cv.tag_lower("bahn", self.halter_item)
 
     def _marker(self, e: Ereignis, tag: str = "auswahl") -> None:
         if self._modus != "dreh":
@@ -577,7 +643,11 @@ class SimulationDialog(Dialog):
         bx0, by0 = self._bild_pos
         cell = self._cell
         if op.lage == "radial" and a in fs.h:
-            self._bild_fuellen(fs.h[a], fs.orig[a])
+            # Draufsicht neu aufbauen ist teuer: beim Abspielen höchstens ~12-mal je Sekunde
+            jetzt = time.perf_counter()
+            if not self._spielt or jetzt - self._bild_zeit > 0.04 or self.ab.fertig:
+                self._bild_zeit = jetzt
+                self._bild_fuellen(fs.h[a], fs.orig[a], a)
             tx = bx0 + (z - fs.z0) / fs.g * cell
             ty = by0 + (fs.ny - (y - fs.y0) / fs.g) * cell
             rr = w.r / fs.g * cell
@@ -590,14 +660,26 @@ class SimulationDialog(Dialog):
             cv.coords(self.f_achse_r, 0, 0, 0, 0)
             cv.itemconfigure(self.f_titel_r, text="Stirnbohrung C{:g}° · Tiefe Z{:.2f}".format(winkel, z))
 
-    def _bild_fuellen(self, grid, orig) -> None:
+    def _bild_fuellen(self, grid, orig, winkel: Optional[float] = None) -> None:
+        """Draufsicht malen – nur den seit dem letzten Mal geänderten Streifen, wenn möglich."""
         fs = self.fs
         cell = self._cell
         pal = _palette()
+        stand = (winkel, fs.generation, id(self._bild))
+        teil = fs.geaendert.pop(winkel, None) if winkel is not None else None
+        if getattr(self, "_bild_stand", None) == stand and teil is not None:
+            i0, i1 = teil
+        elif getattr(self, "_bild_stand", None) == stand:
+            return  # nichts geändert
+        else:
+            i0, i1 = 0, fs.nz - 1
+            if winkel is not None:
+                fs.geaendert.pop(winkel, None)
+        self._bild_stand = stand
         rows = []
         for j in range(fs.ny - 1, -1, -1):
             cols = []
-            for iz in range(fs.nz):
+            for iz in range(i0, i1 + 1):
                 h = grid[iz][j]
                 if h <= NONE / 2:
                     c = "#FFFFFF"
@@ -607,7 +689,7 @@ class SimulationDialog(Dialog):
                 cols.extend([c] * cell)
             row = "{" + " ".join(cols) + "}"
             rows.extend([row] * cell)
-        self._bild.put(" ".join(rows))
+        self._bild.put(" ".join(rows), to=(i0 * cell, 0))
 
 
 _PAL: List[str] = []

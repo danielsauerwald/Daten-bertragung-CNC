@@ -609,10 +609,16 @@ class KonturDialog(Dialog):
     def edit_postpro(self) -> None:
         from .postpro_dialog import PostproDialog
 
-        name = self.machine.display_name if self.machine is not None else "Kontur-Assistent"
-        res = PostproDialog(self, self.fonts, name, self.pp).show()
+        m = self.machine
+        name = m.display_name if m is not None else "Kontur-Assistent"
+        dlg = PostproDialog(self, self.fonts, name, self.pp, machine_id=m.id if m is not None else "",
+                            steuerung=m.control_name if m is not None else "",
+                            codes=m.codes if m is not None else None, bilder=m.bilder if m is not None else None)
+        res = dlg.show()
         if res is None:
             return
+        if m is not None:
+            m.codes, m.bilder = dlg.codes, dlg.bilder
         self.set_postpro(res)
 
     def set_postpro(self, pp: Postprozessor) -> None:

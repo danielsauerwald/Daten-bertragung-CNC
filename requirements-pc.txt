@@ -1,0 +1,6 @@
+# PC-Version (Windows 10/11, 64 Bit): zusätzlich Bilder lesen mit Claude (Anthropic) und Bildvorschau
+-r requirements.txt
+anthropic==2.8.0
+pillow==13.0.0
+pytest
+pyinstaller==6.22.3

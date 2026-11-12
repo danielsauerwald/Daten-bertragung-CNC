@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime
 import os
 import re
@@ -235,7 +236,34 @@ class MachineListDialog(Dialog):
                         variable=self.kb_var, command=self._kb_changed).pack(anchor="w")
         ttk.Checkbutton(general, text="Auch beim Antippen des Programm-Editors öffnen",
                         variable=self.kb_editor_var, command=self._kb_changed).pack(anchor="w")
+        tk.Label(general, text="BILDER LESEN (M-/G-CODE-LISTEN, ZYKLEN)", bg=C["bg"], fg=C["faint"],
+                 font=fonts.small_bold).pack(anchor="w", pady=(px(self, 8), 0))
+        ki_row = tk.Frame(general, bg=C["bg"])
+        ki_row.pack(anchor="w", fill="x")
+        self.ki_info = tk.Label(ki_row, text="", bg=C["bg"], fg=C["muted"], font=fonts.ui, anchor="w")
+        self.ki_info.pack(side="left")
+        ttk.Button(ki_row, text="API-Schlüssel …", style="Small.TButton", command=self._ki_key).pack(
+            side="left", padx=(px(self, 10), 0))
+        self._ki_text()
         self._fill()
+
+    def _ki_text(self) -> None:
+        from . import ki
+
+        ok, _hint = ki.verfuegbar()
+        if not ok:
+            text = "nur in der PC-Version (Windows 10/11)"
+        elif ki.schluessel():
+            text = "bereit – Schlüssel ist eingetragen"
+        else:
+            text = "kein API-Schlüssel eingetragen"
+        self.ki_info.configure(text=text)
+
+    def _ki_key(self) -> None:
+        from .ki_dialog import SchluesselDialog
+
+        SchluesselDialog(self, self.fonts).show()
+        self._ki_text()
 
     def _kb_changed(self) -> None:
         self.config_obj.touch_keyboard = bool(self.kb_var.get())
@@ -419,6 +447,8 @@ class MachineEditDialog(Dialog):
 
         # Postprozessor (Kontur-Assistent): eigenes Fenster mit Vorschau
         self.post_data = dict(p.post or {})
+        self.codes_data = list(p.codes or [])
+        self.bilder_data = list(p.bilder or [])
         tab = self.tabs["post"]
         tk.Label(tab, text="G- und M-Befehle dieser Maschine für „Kontur → Code“: Werkzeugaufruf, Spindel, "
                            "Kühlmittel, angetriebenes Werkzeug (z. B. S3=/M3= oder S4=/M4=), C-Achse, Klemmung, "
@@ -432,6 +462,8 @@ class MachineEditDialog(Dialog):
         ttk.Button(bar_post, text="Postprozessor bearbeiten …", command=self._edit_post).pack(side="left")
         ttk.Button(bar_post, text="Auf Vorlage zurücksetzen", command=self._reset_post).pack(
             side="left", padx=(px(self, 10), 0))
+        ttk.Button(bar_post, text="Code-Liste …", command=self._show_codes).pack(side="left",
+                                                                                padx=(px(self, 10), 0))
         self._update_post_info()
 
         bar = tk.Frame(self, bg=C["bg"])
@@ -521,10 +553,23 @@ class MachineEditDialog(Dialog):
         from .postpro_dialog import PostproDialog
 
         name = self.v["name"].get().strip() or "Maschine"
-        res = PostproDialog(self, self.fonts, name, self._post()).show()
+        dlg = PostproDialog(self, self.fonts, name, self._post(), machine_id=self.profile.id,
+                            steuerung=self.v["control"].get(), codes=self.codes_data, bilder=self.bilder_data)
+        res = dlg.show()
         if res is not None:
             self.post_data = res.to_dict()
+            self.codes_data, self.bilder_data = dlg.codes, dlg.bilder
             self._update_post_info()
+
+    def _show_codes(self) -> None:
+        from .ki_dialog import CodeListeDialog
+
+        if not self.codes_data and not self.bilder_data:
+            info(self, self.fonts, "Code-Liste", "Noch keine Code-Liste: im Postprozessor „📷 Aus Bildern "
+                                                 "lesen …“ wählen und Fotos der M-/G-Code-Liste laden.")
+            return
+        CodeListeDialog(self, self.fonts, self.v["name"].get().strip() or "Maschine", self.codes_data,
+                        self.bilder_data, self.profile.id).show()
 
     def _reset_post(self) -> None:
         if self.post_data and confirm(self, self.fonts, "Postprozessor zurücksetzen",
@@ -635,6 +680,9 @@ class MachineEditDialog(Dialog):
             strip_control_chars=bool(v["strip_control_chars"].get()),
             auto_save_received=bool(v["auto_save_received"].get()),
             post=dict(self.post_data),
+            codes=list(self.codes_data),
+            bilder=list(self.bilder_data),
+            zyklen=copy.deepcopy(self.profile.zyklen),
         )
         return MachineProfile.from_dict(data)
 

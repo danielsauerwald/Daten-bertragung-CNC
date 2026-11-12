@@ -142,6 +142,18 @@ def main(argv=None) -> int:
         dsim = DrehSimulation(bu, kres)
         dsim.bis_ende()
         assert dsim.fertig and not [e for e in dsim.ereignisse if e.schwer]
+        # Zyklen und Bilder lesen: Fenster vorhanden; in der PC-Version der ganze Weg über HTTP
+        from . import ki
+        from .ki_dialog import VorschlagDialog  # noqa: F401
+        from .zyklen import Zyklus, ZParam
+        from .zyklus_dialog import ZyklusDialog  # noqa: F401
+
+        zy = Zyklus("CYCLE83", vorlage="CYCLE83({RTP},{RFP},{SDIS},{DP})",
+                    parameter=[ZParam(n) for n in ("RTP", "RFP", "SDIS", "DP")])
+        assert zy.code({"RTP": "10", "DP": "-20"}) == "CYCLE83(10,,,-20)"
+        if ki.verfuegbar()[0]:
+            assert ki.selbsttest(), "Bilder lesen: Selbsttest fehlgeschlagen"
+            print("Bilder lesen: bereit (PC-Version)")
         app.editor.set_text("%\nO1234 (SELBSTTEST)\nN10 G0 X0 Y0\nN20 M30\n%\n")
         root.update()
         root.after(1500, root.destroy)

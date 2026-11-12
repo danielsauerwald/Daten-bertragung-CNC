@@ -32,6 +32,9 @@ from . import werkzeugkatalog as wk
 Point = Tuple[float, float]
 INF = float("inf")
 DZ = 0.05
+# Länge der Bahnstücke: fein genug, dass das Werkzeug beim Abspielen gleichmäßig läuft
+STUECK_G1 = 0.25
+STUECK_G0 = 2.0
 TOL_R = 0.012  # Toleranz für „Kontur verletzt“ / „ins Material“ in mm
 
 
@@ -60,6 +63,10 @@ class Schritt:
     eil: bool
     zeile: int
     move: int
+
+    @property
+    def laenge(self) -> float:
+        return math.hypot(self.b[0] - self.a[0], self.b[1] - self.a[1])
 
 
 @dataclass
@@ -409,7 +416,7 @@ class DrehSimulation:
         ln = math.hypot(b[0] - a[0], b[1] - a[1])
         if ln < 1e-9:
             return []
-        n = max(1, int(math.ceil(ln / (6.0 if eil else 1.0))))
+        n = max(1, int(math.ceil(ln / (STUECK_G0 if eil else STUECK_G1) - 1e-9)))
         out = []
         for k in range(n):
             p = (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)

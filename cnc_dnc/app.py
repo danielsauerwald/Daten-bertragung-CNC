@@ -51,6 +51,9 @@ class App:
     def __init__(self, root: tk.Tk, config: AppConfig) -> None:
         self.root = root
         self.cfg = config
+        from . import ki
+
+        ki.einrichten(config)  # API-Schlüssel fürs Bilder-Lesen
         self.fonts = Fonts(root, config.editor_font_size)
         setup_style(root, self.fonts)
 
@@ -352,9 +355,12 @@ class App:
         self.setup_btn = ActionButton(side, f, "Einricht-/Korrekturblatt", kind="neutral", compact=True,
                                       command=self.setup_sheet)
         add(self.setup_btn)
-        self.kontur_btn = ActionButton(side, f, "Kontur → Code …", kind="neutral", compact=True,
+        fr = row(gap=12)
+        self.kontur_btn = ActionButton(fr, f, "Kontur → Code", kind="neutral", compact=True,
                                        command=self.kontur)
-        add(self.kontur_btn, gap=12)
+        self.zyklen_btn = ActionButton(fr, f, "Zyklen", kind="neutral", compact=True, anchor="center",
+                                       command=self.zyklen)
+        place_row(fr, [self.kontur_btn, self.zyklen_btn], weights=(13, 7))
 
         # Suchen / Schrift: ohne eigene Überschrift, sonst passt die Spalte nicht mehr auf 1366x768
         fr = row()
@@ -1219,6 +1225,24 @@ class App:
             self.editor.schedule_refresh()
             self._on_editor_change()
             self.set_status("✓  Arbeitsgänge aus der Kontur eingefügt.  Zurück mit „↶ Rückgängig“.", "ok")
+
+    def zyklen(self) -> None:
+        """Zyklen der Maschine (aus Fotos gelesen) ausfüllen und am Cursor einfügen."""
+        if self.busy:
+            return
+        from .zyklus_dialog import ZyklusDialog
+
+        code = ZyklusDialog(self.root, self.fonts, self.machine, on_changed=self._save_config).show()
+        if not code:
+            return
+        text = self.editor.text
+        if text.index("insert lineend") != text.index("insert linestart"):
+            text.mark_set("insert", "insert lineend")
+            code = "\n" + code
+        text.insert("insert", code + "\n")
+        self.editor.schedule_refresh()
+        self._on_editor_change()
+        self.set_status("✓  Zyklus eingefügt.  Zurück mit „↶ Rückgängig“.", "ok")
 
     def renumber(self) -> None:
         """Satznummern setzen/entfernen – Schema im Fenster wählbar, rückgängig machbar."""

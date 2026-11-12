@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Sequence
 
 from . import dialogs
 from .dialogs import Dialog
@@ -46,11 +46,20 @@ def vorschau(pp: Postprozessor) -> str:
 
 
 class PostproDialog(Dialog):
-    """Ergebnis: Postprozessor oder None."""
+    """Ergebnis: Postprozessor oder None. Nach dem Schließen stehen in ``codes`` und ``bilder`` die
+    (evtl. aus Bildern ergänzte) Code-Liste und die abgelegten Bilder der Maschine."""
 
-    def __init__(self, parent, fonts: Fonts, machine_name: str, pp: Postprozessor) -> None:
+    def __init__(self, parent, fonts: Fonts, machine_name: str, pp: Postprozessor, machine_id: str = "",
+                 steuerung: str = "", codes: Optional[Sequence[Dict[str, str]]] = None,
+                 bilder: Optional[Sequence[str]] = None) -> None:
         super().__init__(parent, fonts, "Postprozessor – " + machine_name)
         self.pp = pp.copy()
+        self.machine_name = machine_name
+        self.machine_id = machine_id
+        self.steuerung = steuerung
+        self.codes: List[Dict[str, str]] = [dict(c) for c in (codes or [])]
+        self.bilder: List[str] = list(bilder or [])
+        self._hinweis = ""  # Meldung nach dem Übernehmen aus Bildern
         self.vars: Dict[str, tk.Variable] = {}
         self._loading = False
         self._job: Optional[str] = None
@@ -61,11 +70,16 @@ class PostproDialog(Dialog):
         head.pack(fill="x", padx=px(self, 16), pady=(px(self, 12), px(self, 6)))
         tk.Label(head, text="Postprozessor  ·  " + machine_name, bg=bg, fg=C["text"], font=fonts.title).pack(
             side="left")
+        ttk.Button(head, text="📷  Aus Bildern lesen …", style="Small.TButton", command=self.aus_bildern).pack(
+            side="left", padx=(px(self, 16), 0))
+        self.codes_btn = ttk.Button(head, text="", style="Small.TButton", command=self.code_liste)
+        self.codes_btn.pack(side="left", padx=(px(self, 6), 0))
+        self._codes_text()
         self.preset = tk.StringVar(master=self, value=self._matching_preset(self.pp))
         ttk.Button(head, text="Vorlage übernehmen", style="Small.TButton", command=self.load_preset).pack(
             side="right")
         ttk.Combobox(head, textvariable=self.preset, values=list(VORLAGEN_NAMEN.values()), state="readonly",
-                     width=42, font=fonts.ui).pack(side="right", padx=(0, px(self, 8)))
+                     width=36, font=fonts.ui).pack(side="right", padx=(0, px(self, 8)))
         tk.Label(head, text="Vorlage:", bg=bg, fg=C["muted"], font=fonts.ui).pack(side="right",
                                                                                    padx=(0, px(self, 6)))
 
@@ -155,6 +169,38 @@ class PostproDialog(Dialog):
         self.wait_window()
         return self.result
 
+    # -- Bilder ------------------------------------------------------------------
+
+    def _codes_text(self) -> None:
+        self.codes_btn.configure(text="Code-Liste ({}) …".format(len(self.codes)))
+        self.codes_btn.state(["!disabled"] if self.codes or self.bilder else ["disabled"])
+
+    def aus_bildern(self) -> None:
+        """M-/G-Code-Liste fotografiert → Vorschläge für die Felder (prüfen, dann übernehmen)."""
+        from . import ki, ki_dialog
+
+        try:
+            pp = self.collect()
+        except ValueError:
+            pp = self.pp
+        res = ki_dialog.postpro_lesen(self, self.fonts, pp, self.steuerung, self.machine_id)
+        if not res:
+            return
+        erg, abgelegt = res
+        self.codes = ki_dialog.codes_zusammenfuehren(self.codes, erg.codes)
+        self.bilder += abgelegt
+        self._codes_text()
+        wahl = ki_dialog.VorschlagDialog(self, self.fonts, erg).show()
+        if wahl:
+            self._hinweis = "✓  {} Feld(er) aus den Bildern übernommen – bitte die Vorschau prüfen, dann " \
+                            "speichern.".format(len(wahl))
+            self._set_fields(ki.postpro_anwenden(pp, wahl))
+
+    def code_liste(self) -> None:
+        from .ki_dialog import CodeListeDialog
+
+        CodeListeDialog(self, self.fonts, self.machine_name, self.codes, self.bilder, self.machine_id).show()
+
     @staticmethod
     def _matching_preset(pp: Postprozessor) -> str:
         """Name der Vorlage, der die Einstellung entspricht (Wechselpunkt egal), sonst leer."""
@@ -232,6 +278,8 @@ class PostproDialog(Dialog):
             self.msg.configure(text="✕  " + err[0], fg=C["error"])
         elif warn:
             self.msg.configure(text="!  " + warn[0], fg=C["warn"])
+        elif self._hinweis:
+            self.msg.configure(text=self._hinweis, fg=C["ok"])
         else:
             self.msg.configure(text="Platzhalter: {T} {T2} Werkzeug · {D} {D2} Korrektur · {S} Drehzahl · "
                                     "{W} Winkel · | neue Zeile", fg=C["muted"])

@@ -57,3 +57,39 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/CNC-Datenuebertragung.exe
+
+  build-windows-pc:
+    name: EXE bauen (PC, Windows 10/11, 64 Bit – mit Bilder lesen)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - name: Abhängigkeiten
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-pc.txt
+      - name: Tests
+        run: python -m pytest -q
+      - name: EXE bauen
+        run: >
+          python -m PyInstaller --noconfirm --clean --onefile --windowed
+          --name CNC-Datenuebertragung-PC --icon assets\app.ico
+          --collect-submodules anthropic CNC-Datenuebertragung.pyw
+      - name: Selbsttest der EXE (inkl. Bilder lesen gegen lokalen Test-Server)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\CNC-Datenuebertragung-PC.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Selbsttest fehlgeschlagen (Exit-Code $($p.ExitCode))" }
+          Get-Item dist\CNC-Datenuebertragung-PC.exe | Format-List Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CNC-Datenuebertragung-PC-Windows
+          path: dist/CNC-Datenuebertragung-PC.exe
+      - name: Release anlegen (nur bei Versions-Tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CNC-Datenuebertragung-PC.exe

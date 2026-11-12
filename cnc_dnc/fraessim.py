@@ -24,6 +24,8 @@ from .simulation import Ereignis
 from . import werkzeugkatalog as wk
 
 G = 0.2  # Rastermaß in mm
+STUECK_G1 = 0.5  # Länge der Bahnstücke beim Abspielen
+STUECK_G0 = 3.0
 TOL = 0.06
 NONE = -1e9  # kein Material in der Zelle
 P3 = Tuple[float, float, float]
@@ -37,6 +39,10 @@ class FSchritt:
     b: P3
     eil: bool
     zeile: int
+
+    @property
+    def laenge(self) -> float:
+        return math.sqrt(sum((self.b[k] - self.a[k]) ** 2 for k in range(3)))
 
 
 class FWerkzeug:
@@ -103,7 +109,7 @@ class FraesSimulation:
                     line = op.zeilen[wi] + mi if wi < len(op.zeilen) else -1
                     ln = math.sqrt((nx - x) ** 2 + (ny - y) ** 2 + (nzz - z) ** 2)
                     if ln > 1e-9:
-                        n = max(1, int(math.ceil(ln / (10.0 if mv.kind == "G0" else 2.0))))
+                        n = max(1, int(math.ceil(ln / (STUECK_G0 if mv.kind == "G0" else STUECK_G1) - 1e-9)))
                         for k in range(n):
                             a = (x + (nx - x) * k / n, y + (ny - y) * k / n, z + (nzz - z) * k / n)
                             b = (x + (nx - x) * (k + 1) / n, y + (ny - y) * (k + 1) / n, z + (nzz - z) * (k + 1) / n)
@@ -124,6 +130,9 @@ class FraesSimulation:
         self.orig = {a: [row[:] for row in grid] for a, grid in self.h.items()}
         self.bohrungen: List[Tuple[float, float, float, float]] = []  # (winkel, x, r, tiefste z)
         self._vorher: Dict[Tuple[int, int], List[List[float]]] = {}
+        # geänderter Z-Bereich (Rasterindex von/bis) je Winkellage – die Anzeige malt nur den neu
+        self.geaendert: Dict[float, List[int]] = {}
+        self.generation = getattr(self, "generation", 0) + 1
         self.i = 0
         self.ereignisse: List[Ereignis] = []
         self._gemeldet: set = set()
@@ -188,6 +197,10 @@ class FraesSimulation:
         if min(xa, xb) >= self.R + 0.01:
             return  # ganz über dem Teil
         grid = self.h[a]
+        lo = max(0, int((min(za, zb) - w.r - self.z0) / self.g) - 1)
+        hi = min(self.nz - 1, int((max(za, zb) + w.r - self.z0) / self.g) + 1)
+        g_alt = self.geaendert.get(a)
+        self.geaendert[a] = [lo, hi] if g_alt is None else [min(g_alt[0], lo), max(g_alt[1], hi)]
         if abs(xb - xa) < 1e-9 and w.k == 0:
             if abs(zb - za) < 1e-9:
                 self._streifen(idx, st, grid, w, xa, (ya, yb), za, quer=True)

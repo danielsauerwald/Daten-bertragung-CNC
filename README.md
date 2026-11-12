@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.12
+# CNC-Datenübertragung 2.13
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -54,6 +54,10 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
   siehe [Simulation](#simulation).
 - **Frässtrategien**: Flächen zickzack/Gleichlauf/Gegenlauf, Nuten in Bahnen, mit Rampe oder
   trochoidal, Bohrungen mit Entspanen/Spanbruch.
+- **Bilder lesen (PC-Version)**: Foto der M-/G-Code-Liste laden – das Programm schlägt daraus die
+  Felder des Postprozessors vor und legt die Code-Liste bei der Maschine ab. Foto eines Zyklus
+  laden – daraus wird ein Zyklus zum Ausfüllen und Einfügen, siehe [Bilder lesen](#bilder-lesen-pc-version).
+- **Zyklen je Maschine**: Taste **Zyklen** im Hauptfenster – Werte eintragen, am Cursor einfügen.
 - **Fenster passen auf jeden Windows-Bildschirm**: Kontur-Assistent und Dialoge richten sich nach
   dem freien Bereich über der Taskleiste (auch bei 125 %/150 % Skalierung); die Tasten unten
   bleiben immer sichtbar.
@@ -75,12 +79,19 @@ Tasten für die Bedienung am Tablet (Panasonic Toughbook, Windows 7 und neuer).
 
 ### Variante A: fertige EXE (empfohlen)
 
-Bei jedem Hochladen baut GitHub automatisch die Datei `CNC-Datenuebertragung.exe`:
+Bei jedem Hochladen baut GitHub automatisch zwei Programmdateien:
+
+| Datei | Für | Besonderheit |
+|---|---|---|
+| `CNC-Datenuebertragung.exe` (Artifact **CNC-Datenuebertragung-Windows**) | Toughbook, Windows 7 und neuer | Python 3.8, 32 Bit |
+| `CNC-Datenuebertragung-PC.exe` (Artifact **CNC-Datenuebertragung-PC-Windows**) | PC mit Windows 10/11 (64 Bit) | zusätzlich **Bilder lesen** (M-/G-Code-Listen, Zyklen) und Bildvorschau |
+
+Beide lesen dieselben Einstellungen und Programme; alles andere ist gleich.
 
 1. Auf GitHub im Repository auf **Actions** gehen, dann **Windows-Programm bauen** wählen
    und den neuesten grünen Lauf öffnen.
-2. Unten bei **Artifacts** die Datei **CNC-Datenuebertragung-Windows** herunterladen und entpacken.
-3. `CNC-Datenuebertragung.exe` auf das Tablet kopieren, z. B. auf den Desktop, und starten.
+2. Unten bei **Artifacts** die passende Datei herunterladen und entpacken.
+3. Die EXE auf das Tablet bzw. den PC kopieren, z. B. auf den Desktop, und starten.
    Eine Installation ist nicht nötig.
 
 Wenn ein Versions-Tag (z. B. `v2.0.0`) angelegt wird, erscheint die EXE zusätzlich unter **Releases**.
@@ -93,7 +104,7 @@ egal ob 32 oder 64 Bit.
 > dieses Updates startet das Programm.
 
 Die EXE kann man auch selbst bauen: Auf einem Windows-PC mit Python 3.8 einfach
-`build_exe.bat` doppelklicken. Danach liegt sie in `dist\`.
+`build_exe.bat` doppelklicken (PC-Version: Python 3.12 und `build_exe_pc.bat`). Danach liegt sie in `dist\`.
 
 ### Variante B: direkt mit Python
 
@@ -301,7 +312,7 @@ Die Datei heißt z. B. `METLOG_300069_Korrekturblatt.pdf` und liegt neben dem Pr
 
 ## Kontur → Code
 
-Die Taste **Kontur → Code …** (rechts unter „BEARBEITEN“) öffnet den Kontur-Assistenten:
+Die Taste **Kontur → Code** (rechts unter „BEARBEITEN“) öffnet den Kontur-Assistenten:
 Maße des Teils eingeben, in der Zeichnung ein Element antippen und sagen, was damit passiert –
 **drehen**, **fräsen** (auch auf Winkellagen mit C- und Y-Achse) oder **entgraten**. Daraus
 entsteht ein Programm im Stil der vorhandenen Programme – mit den G- und M-Befehlen der Maschine
@@ -474,8 +485,12 @@ prüft die Stange auf beiden Seiten der Achse gegen die Bohrungswand.
 
 **▶ Simulation …** spielt das Programm im Schnitt durch die Drehachse ab – mit der echten Form
 von Platte, Halter und Bohrstange (aus dem Katalog) bzw. des Bohrers. Abspielen, Schritt für Schritt,
-Tempo, Lupe; die aktive NC-Zeile ist markiert. Mit G41/G42 fährt der Schneidenradius die versetzte
+Lupe; die aktive NC-Zeile ist markiert. Mit G41/G42 fährt der Schneidenradius die versetzte
 Bahn wie an der Steuerung.
+
+Das **Tempo** wird in mm Bahn je Sekunde eingestellt (2 … 1000 mm/s, Eilgang fünfmal so schnell).
+Abgespielt wird mit etwa 60 Bildern je Sekunde in Schritten von 0,25 mm (Fräsen 0,5 mm) – gedacht
+für den PC; auf dem Toughbook läuft die Simulation auch, nur weniger flüssig.
 
 ![Simulation: Bohrstange beim Innen-Vordrehen](docs/simulation_innen.png)
 
@@ -551,6 +566,43 @@ G18
 > Maschinenhandbuch einträgt – solange zeigt der Assistent einen Hinweis.
 
 ![Postprozessor Fanuc](docs/postprozessor_fanuc.png)
+
+### Bilder lesen (PC-Version)
+
+Fotos oder Bildschirmfotos aus dem Maschinenhandbuch bzw. von der Steuerung kann das Programm lesen
+lassen – von **Claude**, der KI von Anthropic. Das gibt es nur in der **PC-Version**
+(`CNC-Datenuebertragung-PC.exe`, Windows 10/11) und nur mit Internet.
+
+**Einmal einrichten:** auf [console.anthropic.com](https://console.anthropic.com) anmelden,
+unter „API Keys“ einen Schlüssel erstellen und unter „Billing“ Guthaben aufladen. Im Programm
+**⚙ Maschinen → API-Schlüssel …** eintragen (oder Windows-Umgebungsvariable `ANTHROPIC_API_KEY`).
+Ein Bild kostet je nach Größe etwa 2 bis 15 Cent.
+
+**M-/G-Code-Liste → Postprozessor:** im Postprozessor der Maschine **📷 Aus Bildern lesen …**,
+ein oder mehrere Fotos der Liste wählen. Nach 20–60 Sekunden zeigt ein Fenster je Feld den jetzigen
+Wert, den Vorschlag und die Stelle im Bild. Sichere Vorschläge sind angehakt, unsichere und
+unbrauchbare (z. B. Spindel ein ohne `{S}`) nicht – antippen schaltet um. **Übernehmen** trägt die
+Werte ein; die Vorschau zeigt sofort das Ergebnis, gespeichert wird erst mit **Speichern**.
+Die gelesene **Code-Liste** und die Fotos bleiben bei der Maschine (**Code-Liste …**).
+
+![Vorschläge aus der M-Code-Liste](docs/bilder_vorschlaege.png)
+
+**Zyklus fotografieren → Zyklus:** Taste **Zyklen** im Hauptfenster → **📷 Aus Bild lesen …**,
+Foto der Zyklus-Beschreibung (Aufrufzeile, Parametertabelle) oder der Eingabemaske wählen. Das
+Programm macht daraus eine Vorlage, z. B. `CYCLE83({RTP},{RFP},{SDIS},{DP},…)` oder
+`G83 X{X} Z{Z} R{R} Q{Q} F{F}`, mit Bedeutung und Einheit jedes Parameters. Nach dem Prüfen ist der
+Zyklus in der Liste der Maschine: Werte eintragen (Pflichtwerte mit *), unten steht sofort der
+NC-Text, **Am Cursor einfügen** schreibt ihn ins Programm. Leere Werte lässt der Zyklus weg – bei
+Siemens bleibt die Stelle leer (`CYCLE83(10,0,2,-25,,-5)`), bei Fanuc fällt das Adresswort weg.
+Die zuletzt eingetragenen Werte werden je Zyklus gemerkt. Zyklen lassen sich auch von Hand anlegen
+(**Neu …**) oder nachbessern (**Bearbeiten …**).
+
+![Zyklen der Maschine: CYCLE83 aus einem Foto](docs/zyklen.png)
+
+> Gelesen wird mit dem Modell `claude-opus-5-5` (Antwort als festes JSON-Schema). Lehnt das Modell
+> eine Anfrage ab, rechnet Anthropic sie automatisch mit einem Ersatzmodell nach. Die Bilder werden
+> vor dem Senden verkleinert (lange Kante höchstens 2576 Pixel). Das Ergebnis ist ein Vorschlag –
+> M-Befehle und Zyklusparameter mit dem Handbuch vergleichen und den ersten Lauf vorsichtig einfahren.
 
 ### Prüfungen
 
@@ -653,6 +705,10 @@ cnc_dnc/
   kontur_dialog.py  Fenster „Kontur → Code“ mit Zeichnung zum Antippen
   postpro.py      Postprozessor je Maschine: G-/M-Befehle als Vorlagen, Sinumerik/Fanuc
   postpro_dialog.py  Fenster „Postprozessor“ mit Vorschau
+  simulation.py, fraessim.py, sim_dialog.py  Simulation Drehen (Plattenform) und Fräsen
+  ki.py           Bilder lesen mit Claude (Anthropic): Code-Listen → Postprozessor, Zyklus-Fotos
+  ki_dialog.py    Fenster: API-Schlüssel, Warten, Vorschläge prüfen, Code-Liste
+  zyklen.py, zyklus_dialog.py  Zyklen je Maschine: Vorlage ausfüllen, einfügen
   serial_link.py  Schnittstelle, Senden/Empfangen im Hintergrund-Thread
   config.py       Maschinenprofile, Speichern als JSON
   app.py          Hauptfenster
@@ -671,4 +727,6 @@ xvfb-run -a python -m pytest      # unter Windows einfach: python -m pytest
 ```
 
 Der Code ist bewusst kompatibel zu **Python 3.8**, der letzten Version für Windows 7.
-Er braucht nur Tkinter, das bei Python dabei ist, und `pyserial`.
+Er braucht nur Tkinter, das bei Python dabei ist, und `pyserial`. Die PC-Version bringt zusätzlich
+`anthropic` und Pillow mit (`requirements-pc.txt`); ohne sie bleibt „Bilder lesen“ einfach
+ausgeschaltet. Die Tests für das Bilder-Lesen laufen mit einem Schein-Client, ohne echte Anfragen.

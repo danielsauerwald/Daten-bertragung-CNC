@@ -80,6 +80,10 @@ class MachineProfile:
     file_ext: str = ".nc"
     # Postprozessor für den Kontur-Assistenten (G-/M-Befehle, siehe postpro.py); leer = Vorlage zur Steuerung
     post: Dict[str, Any] = field(default_factory=dict)
+    # Aus Bildern gelesen (PC-Version): M-/G-Code-Liste, abgelegte Bilder, Zyklen (siehe zyklen.py)
+    codes: List[Dict[str, str]] = field(default_factory=list)
+    bilder: List[str] = field(default_factory=list)
+    zyklen: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def display_name(self) -> str:
@@ -152,6 +156,10 @@ class MachineProfile:
             self.file_ext = "." + self.file_ext
         if not isinstance(self.post, dict):
             self.post = {}
+        self.codes = [{"code": str(c.get("code", "")), "bedeutung": str(c.get("bedeutung", ""))}
+                      for c in (self.codes if isinstance(self.codes, list) else []) if isinstance(c, dict)]
+        self.bilder = [str(b) for b in (self.bilder if isinstance(self.bilder, list) else []) if b]
+        self.zyklen = [z for z in (self.zyklen if isinstance(self.zyklen, list) else []) if isinstance(z, dict)]
 
 
 def default_machines() -> List[MachineProfile]:
@@ -175,6 +183,8 @@ class AppConfig:
     renumber_step: int = 10
     korr_landscape: bool = False  # Korrekturblatt quer statt hochkant
     geometry: str = ""
+    # Bilder lesen (PC-Version): API-Schlüssel von console.anthropic.com; leer = Umgebungsvariable
+    ki_schluessel: str = ""
 
     path: str = field(default="", repr=False, compare=False)
 
@@ -233,6 +243,7 @@ class AppConfig:
         except (TypeError, ValueError):
             pass
         cfg.geometry = str(data.get("geometry", ""))
+        cfg.ki_schluessel = str(data.get("ki_schluessel", "") or "")
         return cfg
 
     def save(self) -> None:
@@ -249,6 +260,7 @@ class AppConfig:
             "renumber_step": self.renumber_step,
             "korr_landscape": self.korr_landscape,
             "geometry": self.geometry,
+            "ki_schluessel": self.ki_schluessel,
             "machines": [asdict(m) for m in self.machines],
         }
         tmp = path + ".tmp"
