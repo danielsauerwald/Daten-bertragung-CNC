@@ -81,6 +81,8 @@ class Werkzeug:
     s: float = 2000.0  # Drehzahl
     f: float = 0.2  # Drehen mm/U, Fräsen/Bohren mm/min
     ap: float = 1.0  # Zustellung (Drehen je Seite, Fräsen Tiefe je Schnitt, Bohren Spanbruch-Tiefe)
+    halter: str = ""  # Katalog: Halter/Bohrstange (Drehen) bzw. Bohrer/Fräser (werkzeugkatalog.py)
+    platte: str = ""  # Drehen: Wendeschneidplatte nach ISO, z. B. "VNMG 160408-M"
 
     @property
     def label(self) -> str:
@@ -197,13 +199,63 @@ def _load(cls, data: Dict[str, Any]):
 
 def standard_werkzeuge() -> List[Werkzeug]:
     return [
-        Werkzeug(1, 1, "VNMG08", "schruppen", "", 0, 2300, 0.25, 1.5),
-        Werkzeug(2, 1, "VCMT04", "schlichten", "", 0, 2500, 0.1, 0),
-        Werkzeug(5, 1, "FRAESER D8", "fraeser", "radial", 8, 3000, 300, 1.0),
-        Werkzeug(6, 1, "BOHRER D5", "bohrer", "radial", 5, 2500, 150, 5),
-        Werkzeug(7, 1, "FASENFRAESER 90", "fase", "radial", 10, 4000, 400, 0),
-        Werkzeug(8, 1, "BOHRER D5", "bohrer", "axial", 5, 2500, 150, 5),
+        Werkzeug(1, 1, "VNMG08", "schruppen", "", 0, 2300, 0.25, 1.5, "PVJNR 2525M16", "VNMG 160408-M"),
+        Werkzeug(2, 1, "VCMT04", "schlichten", "", 0, 2500, 0.1, 0, "SVJCR 2020K16", "VCMT 160404-F"),
+        Werkzeug(5, 1, "FRAESER D8", "fraeser", "radial", 8, 3000, 300, 1.0, "VHM-FRAESER D8 Z3"),
+        Werkzeug(6, 1, "BOHRER D5", "bohrer", "radial", 5, 2500, 150, 5, "VHM-BOHRER D5"),
+        Werkzeug(7, 1, "FASENFRAESER 90", "fase", "radial", 10, 4000, 400, 0, "FASENFRAESER D10 90"),
+        Werkzeug(8, 1, "BOHRER D5", "bohrer", "axial", 5, 2500, 150, 5, "VHM-BOHRER D5"),
     ]
+
+
+def kurzname(platte_code: str) -> str:
+    """Name wie in den Programmen üblich: „VNMG 160408-M“ -> „VNMG08“."""
+    from .werkzeugkatalog import parse_platte
+
+    p = parse_platte(platte_code)
+    if p is None:
+        return ""
+    if p.form == "R":
+        return "{} D{:g}".format(p.code[:4], p.ic)
+    return "{}{:02d}".format(p.code[:4], int(round(p.radius * 10)))
+
+
+def dreh_geometrie(w: Werkzeug):
+    """(Halter, Platte, Hinweise) eines Drehwerkzeugs für die Simulation.
+
+    Fehlt etwas (z. B. alte Werkzeugliste), wird es aus der Bezeichnung erraten bzw. eine übliche
+    Vorgabe genommen – das steht dann in den Hinweisen.
+    """
+    from . import werkzeugkatalog as wk
+
+    notes: List[str] = []
+    p = wk.parse_platte(w.platte) or wk.parse_platte(w.name)
+    if p is None:
+        guess = re.match(r"^\s*([CDVWTS])([A-Z])([A-Z])([A-Z])\s*0?(\d)", w.name.upper())
+        default = "VCMT 160404-F" if w.art == "schlichten" else "CNMG 120408-M"
+        if guess:
+            form, frei = guess.group(1), guess.group(2)
+            rad = guess.group(5)
+            for code in wk.PLATTEN:
+                q = wk.parse_platte(code)
+                if q and q.form == form and q.freiwinkel == frei and abs(q.radius * 10 - int(rad)) < 1e-6:
+                    default = code
+                    break
+        p = wk.parse_platte(default)
+        notes.append("T{}: keine Platte angegeben – Simulation nimmt {}.".format(w.t, p.code))
+    h = wk.halter(w.halter)
+    if h is None or not wk.platte_passt(h, p):
+        if h is not None:
+            notes.append("T{}: Platte {} passt nicht in {}.".format(w.t, p.code, h.code))
+        cand = [x for x in wk.HALTER if x.art == "aussen" and x.hand == "R" and wk.platte_passt(x, p)]
+        if not cand:
+            cand = [x for x in wk.HALTER if x.art == "aussen" and x.hand == "R" and x.form == p.form]
+        if not cand:
+            return None
+        h = cand[0]
+        if not w.halter:
+            notes.append("T{}: kein Halter angegeben – Simulation nimmt {}.".format(w.t, h.code))
+    return h, p, notes
 
 
 def masse(teil: Teil) -> Dict[str, Any]:

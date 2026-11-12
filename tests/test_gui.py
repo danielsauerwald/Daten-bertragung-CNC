@@ -870,3 +870,36 @@ def test_drawing_shows_length_dimensions(app):
     texts = [dlg.cv.itemcget(i, "text") for i in dlg.cv.find_all() if dlg.cv.type(i) == "text"]
     assert "Stange" in texts and not any(t.startswith("Rohteil ") for t in texts)
     dlg.destroy()
+
+
+def test_tool_dialog_uses_catalog(app):
+    from cnc_dnc.kontur import Werkzeug
+    from cnc_dnc.werkzeug_dialog import EIGENES, WerkzeugDialog
+
+    dlg = WerkzeugDialog(app.root, app.fonts, Werkzeug(3, 1, "", "schruppen", "", 0, 2000, 0.25, 2), "T3")
+    dlg.v["halter"].set("PDJNR 2020K15")
+    dlg._halter_changed()
+    plates = list(dlg.platte_cb.cget("values"))
+    assert plates[0] == EIGENES and all(p.startswith("DNMG 15") for p in plates[1:])
+    dlg.v["platte"].set("DNMG 150408-M")
+    dlg._platte_changed()
+    assert dlg.v["name"].get() == "DNMG08"  # Kurzname wie in den Programmen
+    assert "93°" in dlg.info.cget("text") and "Raute 55°" in dlg.info.cget("text")
+    dlg.ok()
+    w = dlg.result
+    assert (w.halter, w.platte, w.name, w.art, w.lage) == ("PDJNR 2020K15", "DNMG 150408-M", "DNMG08", "schruppen", "")
+    # Fräser aus dem Katalog: Durchmesser und Name werden übernommen
+    dlg = WerkzeugDialog(app.root, app.fonts, Werkzeug(9, 1, "", "fraeser", "radial", 0, 3000, 300, 1), "T9")
+    assert not dlg.platte_cb.winfo_manager()  # keine Platte bei Fräsern
+    dlg.v["halter"].set("VHM-FRAESER D12 Z4")
+    dlg._halter_changed()
+    assert dlg.v["dm"].get() == "12" and dlg.v["name"].get() == "FRAESER D12"
+    dlg.ok()
+    assert dlg.result.dm == 12 and dlg.result.halter == "VHM-FRAESER D12 Z4" and dlg.result.lage == "radial"
+    # eigener Name bleibt beim Wechsel der Platte stehen
+    dlg = WerkzeugDialog(app.root, app.fonts, Werkzeug(1, 1, "MEIN SCHRUPPER", "schruppen", "", 0, 2000, 0.2, 1,
+                                                        "PCLNR 2020K12", "CNMG 120408-M"), "T1")
+    dlg.v["platte"].set("CNMG 120412-R")
+    dlg._platte_changed()
+    assert dlg.v["name"].get() == "MEIN SCHRUPPER"
+    dlg.destroy()

@@ -14,9 +14,7 @@ from .kontur import (
     ECKEN,
     FEATURE_LAGE,
     FEATURES,
-    LAGEN,
     SEG_OPS,
-    TOOL_ARTEN,
     Ergebnis,
     Fraesung,
     Geometrie,
@@ -483,15 +481,15 @@ class KonturDialog(Dialog):
 
     def _tab_werkzeuge(self) -> None:
         f = self._tab("Werkzeuge")
-        self.wz_tree = self._tree(f, [("t", "T", 34), ("name", "Bezeichnung", 120), ("art", "Art", 110),
-                                      ("lage", "Lage", 52), ("dm", "Ø", 36), ("s", "S", 46), ("f", "F", 42),
-                                      ("ap", "Zust.", 40)], height=8)
+        self.wz_tree = self._tree(f, [("t", "T", 30), ("name", "Bezeichnung", 104), ("halter", "Halter / Platte", 138),
+                                      ("art", "Art", 80), ("s", "S", 46), ("f", "F", 42), ("ap", "Zust.", 40)],
+                                  height=8)
         self.wz_tree.bind("<Double-1>", lambda e: self.edit_tool())
         self._buttons(f, [("+ Werkzeug …", self.add_tool), ("Ändern …", self.edit_tool),
                           ("Löschen", self.delete_tool)])
-        tk.Label(f, text="F: Drehen mm/U, Fräsen und Bohren mm/min.  Zustellung: Drehen je Seite, Fräsen Tiefe je "
-                         "Schnitt, Bohren Tiefe je Spanbruch (0 = in einem Zug).  Lage: radial (quer zur Achse, "
-                         "Y-Achse) oder axial (Stirnseite).", bg=C["surface"], fg=C["muted"], font=self.fonts.small,
+        tk.Label(f, text="Halter, Platten, Bohrstangen, Bohrer und Fräser kommen aus dem Katalog (ISO-Bezeichnungen). "
+                         "F: Drehen mm/U, Fräsen/Bohren mm/min. Zustellung: Drehen je Seite, Fräsen Tiefe je Schnitt, "
+                         "Bohren je Spanbruch (0 = in einem Zug).", bg=C["surface"], fg=C["muted"], font=self.fonts.small,
                  wraplength=px(self, 460), justify="left", anchor="w").pack(fill="x", pady=(px(self, 8), 0))
         self._shrink_list_first(f, self.wz_tree)
 
@@ -713,9 +711,13 @@ class KonturDialog(Dialog):
             self.ft_tree.selection_set(sel_ft[0])
         self.wz_tree.delete(*self.wz_tree.get_children())
         for w in sorted(t.werkzeuge, key=lambda w: w.t):
+            art = {"schruppen": "Schruppen", "schlichten": "Schlichten", "fraeser": "Fräser", "bohrer": "Bohrer",
+                   "fase": "Fase"}.get(w.art, w.art)
+            if w.lage:
+                art += " " + {"radial": "rad.", "axial": "ax."}.get(w.lage, w.lage)
+            kat = " · ".join(x for x in (w.halter, w.platte) if x) or "–"
             self.wz_tree.insert("", "end", iid="t{}".format(w.t),
-                                values=(w.t, w.name, TOOL_ARTEN.get(w.art, w.art), LAGEN.get(w.lage, w.lage),
-                                        fmt(w.dm) if w.dm else "", fmt(w.s), fmt(w.f), fmt(w.ap) if w.ap else ""))
+                                values=(w.t, w.name, kat, art, fmt(w.s), fmt(w.f), fmt(w.ap) if w.ap else ""))
         self._fill_tool_combos()
 
     def _show_code(self) -> None:
@@ -997,30 +999,13 @@ class KonturDialog(Dialog):
     # ---------------------------------------------------------------- Werkzeuge
 
     def _tool_form(self, w: Werkzeug, title: str) -> Optional[Werkzeug]:
-        res = FormDialog(self, self.fonts, title, [
-            ("t", "T-Nummer", str(w.t)), ("d", "D (Schneide)", str(w.d)), ("name", "Bezeichnung", w.name),
-            ("art", "Art", TOOL_ARTEN[w.art], list(TOOL_ARTEN.values())),
-            ("lage", "Lage (angetrieben)", LAGEN[w.lage], list(LAGEN.values())),
-            ("dm", "Durchmesser", fmt(w.dm) if w.dm else ""), ("s", "Drehzahl S", fmt(w.s)),
-            ("f", "Vorschub F", fmt(w.f)), ("ap", "Zustellung", fmt(w.ap) if w.ap else "")]).show()
-        if not res:
-            return None
-        try:
-            new = Werkzeug(int(parse_num(res["t"])), int(parse_num(res["d"] or "1")), res["name"],
-                           _inv(TOOL_ARTEN)[res["art"]], _inv(LAGEN)[res["lage"]],
-                           parse_num(res["dm"] or "0"), parse_num(res["s"]), parse_num(res["f"]),
-                           parse_num(res["ap"] or "0"))
-        except (ValueError, KeyError):
-            dialogs.error(self, self.fonts, "Ungültige Eingabe", "T, S und F müssen Zahlen sein.")
-            return None
-        if not 0 < new.t < 1000:
-            dialogs.error(self, self.fonts, "Ungültige Eingabe", "T-Nummer 1 … 999.")
-            return None
-        return new
+        from .werkzeug_dialog import WerkzeugDialog
+
+        return WerkzeugDialog(self, self.fonts, w, title).show()
 
     def add_tool(self) -> None:
         nr = max([w.t for w in self.teil.werkzeuge] + [0]) + 1
-        new = self._tool_form(Werkzeug(nr, 1, "", "fraeser", "radial", 6, 3000, 300, 1), "Werkzeug hinzufügen")
+        new = self._tool_form(Werkzeug(nr, 1, "", "schlichten", "", 0, 2500, 0.1, 0), "Werkzeug hinzufügen")
         if new is None:
             return
         if self.teil.tool(new.t):
