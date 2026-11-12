@@ -41,6 +41,7 @@ FEATURES = {
     "nut": "Längsnut",
     "bohrung_radial": "Bohrung radial",
     "bohrung_axial": "Bohrung Stirnseite",
+    "mantelnut": "Mantelnut (C-Achse)",
 }
 TOOL_ARTEN = {
     "schruppen": "Drehen schruppen",
@@ -52,7 +53,8 @@ TOOL_ARTEN = {
 }
 LAGEN = {"": "–", "radial": "radial", "axial": "axial", "mitte": "stehend (Drehmitte)"}
 # Welche Werkzeuglage eine Fräsung braucht
-FEATURE_LAGE = {"flaeche": "radial", "nut": "radial", "bohrung_radial": "radial", "bohrung_axial": "axial"}
+FEATURE_LAGE = {"flaeche": "radial", "nut": "radial", "bohrung_radial": "radial", "bohrung_axial": "axial",
+                "mantelnut": "radial"}
 
 
 # ==========================================================================
@@ -104,6 +106,8 @@ class Fraesung:
     wz_entgraten: int = 0
     fase: float = 0.3
     strategie: str = ""  # leer = Vorgabe der Art, siehe STRATEGIEN
+    # Nut auf dem Mantel: Mittellinie als Punkte [Z, C in Grad] auf der Abwicklung (C darf über 360 gehen)
+    bahn: List[List[float]] = field(default_factory=list)
 
 
 # Frässtrategien je Art (erster Eintrag = Vorgabe)
@@ -115,6 +119,7 @@ STRATEGIEN: Dict[str, Dict[str, str]] = {
                        "einzug": "in einem Zug"},
     "bohrung_axial": {"entspanen": "Entspanen (ganz raus)", "spanbruch": "Spanbruch (kurz zurück)",
                       "einzug": "in einem Zug"},
+    "mantelnut": {"pendeln": "schräg eintauchen (Wendel / Pendeln)", "senkrecht": "senkrecht eintauchen"},
 }
 RAMPENWINKEL = 3.0  # Grad
 TROCHOID_MIN = 1.25  # Nutbreite mindestens 1,25 × Fräser-Ø
@@ -180,6 +185,9 @@ class Teil:
         base.werkzeuge = [_load(Werkzeug, p) for p in data.get("werkzeuge", []) if isinstance(p, dict)]
         for fr in base.fraesungen:
             fr.winkel = [float(w) for w in fr.winkel if isinstance(w, (int, float))] or [0.0]
+            fr.bahn = [[float(p[0]), float(p[1])] for p in fr.bahn
+                       if isinstance(p, (list, tuple)) and len(p) >= 2
+                       and all(isinstance(v, (int, float)) for v in p[:2])]
         base.punkte[0].x, base.punkte[0].z = 0.0, 0.0
         if "innen" not in data and base.werkzeuge:  # Datei von vor der Innenbearbeitung
             used = {w.t for w in base.werkzeuge}
@@ -1140,6 +1148,7 @@ class FMove:
     x: Optional[float] = None
     y: Optional[float] = None
     z: Optional[float] = None
+    c: Optional[float] = None  # Mantel (Zylinder-Interpolation): Winkel der Werkzeugachse in Grad
 
 
 @dataclass
@@ -1737,6 +1746,277 @@ def _zyl_entgraten(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkze
         FEATURES.get(fr.art, fr.art), w.t, winkel))
 
 
+# ---------------------------------------------------------------------------
+# Nut auf dem Mantel (Zylinder-Interpolation): Bahn in Z und C, z. B. umlaufend oder als Wendel
+# ---------------------------------------------------------------------------
+
+
+def _versatz(pts: List[Tuple[float, float]], o_s: float, o_z: float) -> List[Tuple[float, float, float]]:
+    """Parallele zur Bahn in der Abwicklung (s, z): je Punkt (s, z, Normalen-s-Anteil).
+    ``o_s``/``o_z``: Abstand in s- bzw. z-Richtung der Normalen (links positiv)."""
+    n = len(pts)
+    normals = []
+    for i in range(n - 1):
+        ds, dz = pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]
+        ln = math.hypot(ds, dz)
+        normals.append((-dz / ln, ds / ln))
+    out = []
+    for i in range(n):
+        if i == 0:
+            nv = normals[0]
+            k = 1.0
+        elif i == n - 1:
+            nv = normals[-1]
+            k = 1.0
+        else:
+            a, b = normals[i - 1], normals[i]
+            m = (a[0] + b[0], a[1] + b[1])
+            ml = math.hypot(*m)
+            nv = (m[0] / ml, m[1] / ml) if ml > 1e-9 else b
+            k = min(3.0, 1.0 / max(1e-3, nv[0] * b[0] + nv[1] * b[1]))  # Gehrung, begrenzt
+        out.append((pts[i][0] + nv[0] * o_s * k, pts[i][1] + nv[1] * o_z * k, nv[0]))
+    return out
+
+
+def _mantel_bahn(fr: Fraesung, rp: float) -> Tuple[List[Tuple[float, float]], bool]:
+    """Mittellinie in der Abwicklung (s in mm, z) und ob sie ganz herum läuft (Ringnut)."""
+    pts = [(rp * math.radians(c), z) for z, c in fr.bahn]
+    c0, c1 = fr.bahn[0][1], fr.bahn[-1][1]
+    ring = (abs(fr.bahn[0][0] - fr.bahn[-1][0]) < TOL and abs(c1 - c0) >= 360 - 1e-6
+            and abs(((c1 - c0) + 1e-6) % 360.0) < 2e-6)
+    return pts, ring
+
+
+def _mantelnut(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeug, res: Ergebnis, out: _Out,
+               deburr: bool) -> None:
+    """Nut auf der Mantelfläche: Fräser radial, C-Achse interpoliert mit X/Z (TRACYL bzw. G07.1)."""
+    pp = out.pp
+    label = "Fräsung {} ({})".format(nr, FEATURES[fr.art])
+    if not pp.zyl_ein.strip() or not pp.zyl_aus.strip():
+        res.errors.append("{}: braucht Zylinder-Interpolation – im Postprozessor (Reiter „Mantel“) „Zylinder "
+                          "ein/aus“ eintragen (Siemens TRACYL, Fanuc G07.1).".format(label))
+        return
+    bahn = [(float(p[0]), float(p[1])) for p in fr.bahn]
+    if len(bahn) < 2:
+        res.errors.append("{}: Bahn fehlt (mindestens Anfang und Ende in Z und C).".format(label))
+        return
+    for (za, ca), (zb, cb) in zip(bahn, bahn[1:]):
+        if abs(za - zb) < TOL and abs(ca - cb) < 1e-6:
+            res.errors.append("{}: zwei Bahnpunkte liegen aufeinander (Z{} C{}).".format(label, fmt(za), fmt(ca)))
+            return
+    b, t = fr.mass, fr.tiefe
+    zs = [z for z, _c in bahn]
+    z_lo, z_hi = min(zs) - b / 2, max(zs) + b / 2
+    if z_hi > TOL:
+        res.errors.append("{}: Die Nut ragt über die Stirnseite (bis Z{}).".format(label, fmt(z_hi)))
+        return
+    rp = contour_radius(teil, geom, z_lo, z_hi)
+    rp_min = _min_radius(teil, geom, z_lo, z_hi)
+    if rp - rp_min > 0.01:
+        res.errors.append("{}: Die Nut liegt nicht auf einem Durchmesser (Ø{} … Ø{}) – auf dem Mantel nur auf "
+                          "einem zylindrischen Stück.".format(label, fmt(2 * rp_min), fmt(2 * rp)))
+        return
+    if b <= TOL or t <= TOL or t >= rp - 0.5:
+        res.errors.append("{}: Breite/Tiefe passen nicht (Ø{}).".format(label, fmt(2 * rp)))
+        return
+    s_sich = max(0.5, teil.sicherheit)
+    x_app = 2 * (contour_radius(teil, geom, z_lo - 1, min(0.0, z_hi + 1)) + s_sich)
+    mitte, ring = _mantel_bahn(fr, rp)
+    achse = (pp.zyl_achse.strip().upper() or "Y")[0]
+
+    def wort(sp: float, zp: float, x: Optional[float] = None) -> str:
+        cdeg = math.degrees(sp / rp)
+        u = cdeg if pp.zyl_grad else sp
+        return "G01 {}{}{} Z{}".format("X{} ".format(pp.num(x)) if x is not None else "", achse, pp.num(u),
+                                       pp.num(zp))
+
+    lines: List[str] = []
+    moves: List[FMove] = []
+
+    def zeile(text: str, mv: Optional[FMove] = None) -> None:
+        lines.append(text)
+        moves.append(mv or FMove("G0"))
+
+    def anfahren(sp: float, zp: float, x_tief: float, f_ein: float) -> None:
+        """Außerhalb positionieren, Zylinder ein, eintauchen."""
+        c_deg = math.degrees(sp / rp)
+        for ln in pp.fill(pp.c_pos, W=_norm_winkel(c_deg)):
+            zeile(ln, FMove("G0", c=c_deg))
+        zeile("G00 Z" + pp.num(zp), FMove("G0", z=zp))
+        zeile("G00 X" + pp.num(x_app), FMove("G0", x=x_app))
+        for ln in pp.fill(pp.zyl_ebene) + pp.fill(pp.zyl_ein, ZD=2 * rp, ZR=rp):
+            zeile(ln)
+        zeile("G01 X{} F{}".format(pp.num(x_tief), pp.num(f_ein)), FMove("G1", x=x_tief))
+
+    def abfahren() -> None:
+        for ln in pp.fill(pp.zyl_aus):
+            zeile(ln)
+        zeile("G00 X" + pp.num(x_app), FMove("G0", x=x_app))
+
+    def strecke(pts: List[Tuple[float, float]], x_von: float, x_bis: float, f: Optional[float]) -> None:
+        """Bahnpunkte abfahren (ohne den ersten), X linear von x_von nach x_bis über die Länge.
+        Lange Stücke werden in höchstens 90° Drehung geteilt (eindeutige Drehrichtung an jeder Steuerung)."""
+        fein = [pts[0]]
+        for a_, b_ in zip(pts, pts[1:]):
+            n = max(1, int(math.ceil(abs(math.degrees((b_[0] - a_[0]) / rp)) / 90.0 - 1e-9)))
+            for k in range(1, n + 1):
+                fein.append((a_[0] + (b_[0] - a_[0]) * k / n, a_[1] + (b_[1] - a_[1]) * k / n))
+        pts = fein
+        total = sum(math.hypot(b_[0] - a_[0], b_[1] - a_[1]) for a_, b_ in zip(pts, pts[1:])) or 1.0
+        done = 0.0
+        for k, (a_, b_) in enumerate(zip(pts, pts[1:])):
+            done += math.hypot(b_[0] - a_[0], b_[1] - a_[1])
+            x = x_von + (x_bis - x_von) * done / total if abs(x_bis - x_von) > 1e-9 else None
+            text = wort(b_[0], b_[1], x)
+            if k == 0 and f is not None:
+                text += " F" + pp.num(f)
+            zeile(text, FMove("G1", x=x if x is not None else x_bis, z=b_[1], c=math.degrees(b_[0] / rp)))
+
+    if deburr:
+        c = fr.fase
+        phi_e = math.asin(min(1.0, b / 2 / rp))
+        # Kante: in s-Richtung um rp·asin(b/2/rp) (Wand parallel zur Fräserachse), in z um b/2
+        links = _versatz(mitte, rp * phi_e, b / 2)
+        rechts = _versatz(mitte, -rp * phi_e, -b / 2)
+
+        def tiefe(n_s: float) -> float:
+            beta = math.asin(min(1.0, math.sin(phi_e) * abs(n_s)))
+            return c * (math.cos(beta) + math.sin(beta))
+
+        if ring:
+            schleifen = [links, rechts]
+        else:
+            def kappe(p: Tuple[float, float], von: Tuple[float, float, float], nach: Tuple[float, float, float],
+                      aussen: Tuple[float, float]):
+                """Halbkreis um das Bahnende von ``von`` nach ``nach`` – außen herum (Richtung ``aussen``)."""
+                a0 = math.atan2(von[1] - p[1], von[0] - p[0])
+                a1 = math.atan2(nach[1] - p[1], nach[0] - p[0])
+                da = (a1 - a0) % (2 * math.pi)
+                if abs(da) < 1e-6:
+                    da = math.pi
+                am = a0 + da / 2
+                if math.cos(am) * aussen[0] + math.sin(am) * aussen[1] < 0:
+                    da -= 2 * math.pi  # andersherum, sonst liefe der Bogen in die Nut hinein
+                pts_k = []
+                for i in range(1, 8):
+                    a = a0 + da * i / 8
+                    pts_k.append((p[0] + rp * phi_e * math.cos(a), p[1] + b / 2 * math.sin(a), math.cos(a)))
+                return pts_k
+
+            def richtung(a_: Tuple[float, float], b_: Tuple[float, float]) -> Tuple[float, float]:
+                ln = math.hypot(b_[0] - a_[0], b_[1] - a_[1])
+                return (b_[0] - a_[0]) / ln, (b_[1] - a_[1]) / ln
+
+            loop = list(links) + kappe(mitte[-1], links[-1], rechts[-1], richtung(mitte[-2], mitte[-1]))
+            loop += list(reversed(rechts))
+            loop += kappe(mitte[0], rechts[0], links[0], richtung(mitte[1], mitte[0])) + [links[0]]
+            schleifen = [loop]
+        tips = [(z, rp - tiefe(n)) for lp in schleifen for _s, z, n in lp]
+        if not _cone_clear(teil, geom, tips, w.dm / 2.0, rp):
+            res.errors.append(_cone_msg(label, w))
+            return
+        title = "ENTGRATEN MANTELNUT {}X{}".format(fmt(b), fmt(t))
+        for lp in schleifen:
+            x0 = 2 * (rp - tiefe(lp[0][2]))
+            anfahren(lp[0][0], lp[0][1], x0, w.f)
+            for k, (sp, zp, n) in enumerate(lp[1:]):
+                x = 2 * (rp - tiefe(n))
+                zeile(wort(sp, zp, x), FMove("G1", x=x, z=zp, c=math.degrees(sp / rp)))
+            abfahren()
+    else:
+        if w.dm > b + TOL:
+            res.errors.append("{}: Fräser Ø{} ist breiter als die Nut ({}).".format(label, fmt(w.dm), fmt(b)))
+            return
+        if w.ap <= TOL:
+            res.errors.append("{}: Zustellung (Tiefe je Schnitt) von T{} fehlt.".format(label, w.t))
+            return
+        title = "FRAESEN MANTELNUT {}X{}".format(fmt(b), fmt(t))
+        rest = (b - w.dm) / 2
+        lanes = [0.0]
+        if rest > TOL:
+            n_side = int(math.ceil(rest / (0.8 * w.dm) - 1e-9))
+            for k in range(1, n_side + 1):
+                lanes += [rest * k / n_side, -rest * k / n_side]
+        bahnen = {o: [(p[0], p[1]) for p in _versatz(mitte, o, o)] if abs(o) > 1e-9 else list(mitte)
+                  for o in lanes}
+        tiefen = [2 * r for r in _steps(rp, rp - t, w.ap)]
+        pendeln = strategie(fr) == "pendeln"
+        f_ein = w.f * 0.5
+        x_prev = 2 * rp
+        if ring:
+            # ganz herum: jede Runde schließt an die vorige an, C zählt weiter
+            umfang = mitte[-1][0] - mitte[0][0]
+            runde = [0]
+
+            def lauf(lane: List[Tuple[float, float]], x_von: float, x_bis: float, f: Optional[float]) -> None:
+                off = umfang * runde[0]
+                pts = [(p[0] + off, p[1]) for p in lane]
+                strecke(pts, x_von, x_bis, f)
+                runde[0] += 1
+
+            start = bahnen[0][0]
+            anfahren(start[0], start[1], x_prev if pendeln else tiefen[0], f_ein)
+            for x in tiefen:
+                lauf(bahnen[0], x_prev if pendeln else x, x, w.f)
+                for o in lanes[1:]:
+                    off = umfang * runde[0]
+                    p0 = bahnen[o][0]
+                    zeile(wort(p0[0] + off, p0[1]), FMove("G1", z=p0[1], c=math.degrees((p0[0] + off) / rp)))
+                    lauf(bahnen[o], x, x, None)
+                    p1 = bahnen[0][0]
+                    zeile(wort(p1[0] + umfang * runde[0], p1[1]),
+                          FMove("G1", z=p1[1], c=math.degrees((p1[0] + umfang * runde[0]) / rp)))
+                x_prev = x
+            if pendeln:
+                lauf(bahnen[0], x_prev, x_prev, None)  # Rampe der letzten Runde nachfräsen
+            abfahren()
+        else:
+            vor = True
+            start = bahnen[0][0]
+            anfahren(start[0], start[1], x_prev if pendeln else tiefen[0], f_ein)
+            for i, x in enumerate(tiefen):
+                for j, o in enumerate(lanes):
+                    lane = bahnen[o] if vor else list(reversed(bahnen[o]))
+                    if j:  # seitlich auf die nächste Bahn (am selben Ende)
+                        zeile(wort(lane[0][0], lane[0][1]),
+                              FMove("G1", z=lane[0][1], c=math.degrees(lane[0][0] / rp)))
+                    elif not pendeln and i:
+                        zeile("G01 X{} F{}".format(pp.num(x), pp.num(f_ein)), FMove("G1", x=x))
+                    strecke(lane, x_prev if (pendeln and j == 0) else x, x, w.f)
+                    vor = not vor
+                if len(lanes) > 1:  # zurück auf die Mittelbahn
+                    lane = bahnen[0] if vor else list(reversed(bahnen[0]))
+                    zeile(wort(lane[0][0], lane[0][1]), FMove("G1", z=lane[0][1], c=math.degrees(lane[0][0] / rp)))
+                x_prev = x
+            if pendeln:
+                lane = bahnen[0] if vor else list(reversed(bahnen[0]))
+                strecke(lane, x_prev, x_prev, None)  # Rampe der letzten Bahn nachfräsen
+            abfahren()
+
+    add = out.lines.extend
+    out.raw("")
+    out.raw(pp.comment("{} {}".format(title, w.name)))
+    add(pp.tool_lines(w.t, w.d, pp.vorschub_min, pp.ebene_radial))
+    add(pp.fill(pp.spindel_aus))
+    add(pp.fill(pp.c_ein))
+    # angetriebenes Werkzeug nach dem ersten Positionieren einschalten
+    k_awz = next((i for i, ln in enumerate(lines) if ln.startswith("G00 Z")), 0)
+    awz = pp.fill(pp.awz_ein, S=w.s)
+    lines[k_awz:k_awz] = awz
+    moves[k_awz:k_awz] = [FMove("G0") for _ in awz]
+    start = len(out.lines)
+    add(lines)
+    add(pp.fill(pp.awz_aus))
+    add(pp.fill(pp.kuehl_aus))
+    add(pp.fill(pp.c_aus))
+    add(["G00 X" + pp.num(pp.wechsel_x), "G00 Z" + pp.num(pp.wechsel_z)])
+    add(pp.fill(pp.ebene_drehen))
+    c_start = fr.bahn[0][1]
+    res.fraes_ops.append(FraesOp(nr, w.t, "mantel", [c_start], moves, [start], deburr, title))
+    res.arbeitsgaenge.append("{}{} · T{} · {}".format(FEATURES[fr.art], " entgraten" if deburr else "", w.t,
+                                                     "umlaufend" if ring else "Bahn"))
+
+
 def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
     pp = out.pp
     ops: List[Tuple[int, Fraesung, bool]] = []
@@ -1758,6 +2038,9 @@ def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
             arten = ("bohrer", "fraeser") if fr.art.startswith("bohrung") else ("fraeser",)
             w = _check_tool(res, nr, fr, teil, fr.wz, arten, "Werkzeug")
         if w is None:
+            continue
+        if fr.art == "mantelnut":
+            _mantelnut(teil, geom, nr, fr, w, res, out, deburr)
             continue
         if deburr and fr.art in ("flaeche", "nut") and pp.zyl_entgraten and pp.zyl_ein.strip():
             _zyl_entgraten(teil, geom, nr, fr, w, res, out)
@@ -1823,6 +2106,8 @@ def generate(teil: Teil, rahmen: bool = False, pp: Optional[Postprozessor] = Non
         for nr, fr in enumerate(teil.fraesungen, start=1):
             if fr.art in ("flaeche", "nut"):
                 lo = min(fr.z1, fr.z2)
+            elif fr.art == "mantelnut":
+                lo = min([p[0] for p in fr.bahn] or [0.0]) - fr.mass / 2
             elif fr.art == "bohrung_radial":
                 lo = fr.z1 - fr.mass / 2
             else:

@@ -1232,3 +1232,42 @@ def test_image_reading_needs_pc_version_and_key(app, monkeypatch):
     monkeypatch.setattr(ki_dialog.SchluesselDialog, "show", fake_show)
     assert ki_dialog.bereit(app.root, app.fonts) and app.cfg.ki_schluessel == "sk-ant-test"
     assert ki_dialog.bereit(app.root, app.fonts)  # Schlüssel da: keine Rückfrage mehr
+
+
+def test_mantel_groove_dialog_modes(app):
+    from cnc_dnc.kontur import Fraesung, beispiel_teil
+    from cnc_dnc.kontur_dialog import BAHN_ARTEN, FeatureDialog, KonturDialog, bahn_text
+
+    t = beispiel_teil()
+    fr = Fraesung("mantelnut", [0.0], 0, 0, 6, 2, 0, 5, bahn=[[-22.5, 0.0], [-22.5, 360.0]])
+    d = FeatureDialog(app.root, app.fonts, t, fr, "Mantelnut")
+    assert d.vars["bahn_art"].get() == BAHN_ARTEN["ring"] and "winkel" not in d.vars
+    d.vars["z_a"].set("-20,5")
+    d.ok()
+    assert d.result.bahn == [[-20.5, 0.0], [-20.5, 360.0]] and bahn_text(d.result) == "umlaufend bei Z-20.5"
+    d = FeatureDialog(app.root, app.fonts, t, fr, "Mantelnut")
+    d.vars["bahn_art"].set(BAHN_ARTEN["gerade"])
+    d.update()
+    d.vars["c_a"].set("10")
+    d.vars["z_e"].set("-25")
+    d.vars["c_e"].set("730")
+    d.ok()
+    assert d.result.bahn == [[-22.5, 10.0], [-25.0, 730.0]] and d.result.winkel == [10.0]
+    d = FeatureDialog(app.root, app.fonts, t, fr, "Mantelnut")
+    d.vars["bahn_art"].set(BAHN_ARTEN["punkte"])
+    d.punkte.delete("1.0", "end")
+    d.punkte.insert("1.0", "-20 0\n-27,5  90\n-20 180\nfalsch")
+    d.ok()
+    assert d.result is None and "Z und C" in d.msg.cget("text")
+    d.punkte.delete("1.0", "end")
+    d.punkte.insert("1.0", "-20 0\n-27,5  90\n-20 180")
+    d.ok()
+    assert d.result.bahn == [[-20.0, 0.0], [-27.5, 90.0], [-20.0, 180.0]]
+    # im Assistenten: Taste und Vorgabe aus dem angetippten Zylinder
+    k = KonturDialog(app.root, app.fonts, beispiel_teil(), machines=app.cfg.machines, machine_id=app.machine.id)
+    k.select("seg", 4)  # Ø26 zwischen Z-15 und Z-30
+    labels = [b.cget("text") for b in k.sel_buttons.winfo_children()]
+    assert "Mantelnut" in labels
+    vorgabe = k._default_feature("mantelnut", 4)
+    assert vorgabe.bahn == [[-22.5, 0.0], [-22.5, 360.0]]
+    k.destroy()

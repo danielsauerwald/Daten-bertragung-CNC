@@ -837,3 +837,99 @@ def test_cylinder_interpolation_settings():
     # ältere gespeicherte Postprozessoren bekommen die Vorgaben der Vorlage
     old = {k_: v for k_, v in vorlage("sin_s3").to_dict().items() if not k_.startswith("zyl_")}
     assert k.Postprozessor.from_dict(old).zyl_ein == "TRACYL({ZD})"
+
+
+# ---------------------------------------------------------------------------
+# Nut auf dem Mantel (Zylinder-Interpolation)
+# ---------------------------------------------------------------------------
+
+
+def walze(*fraesungen):
+    t = k.neues_teil()
+    t.name = "WALZE"
+    t.rohteil_d, t.rohteil_l = 32.0, 70.0
+    t.punkte = [KPunkt(0, 0), KPunkt(30, 0, "fase", 1), KPunkt(30, -60)]
+    t.tool(5).dm = 5
+    t.fraesungen = list(fraesungen)
+    return t
+
+
+def _mn(bahn, b=5, t=2, deburr=False, strategie=""):
+    return Fraesung("mantelnut", [bahn[0][1]], 0, 0, b, t, 0, 5, deburr, 7, 0.3, strategie, bahn=bahn)
+
+
+def test_ring_groove_with_tracyl():
+    res = k.generate(walze(_mn([[-30, 0], [-30, 360]], b=6, t=2)))
+    assert res.ok, res.errors
+    blk = _block(res.code, "FRAESEN MANTELNUT 6X2")
+    lines = blk.split("\n")
+    i, j = lines.index("TRACYL(30)"), lines.index("TRAFOOF")
+    assert lines[i - 2:i] == ["G00 Z-30", "G00 X34"] and "SPOS=DC(0)" in lines and "S3=3000 M3=3" in lines
+    inside = lines[i + 1:j]
+    assert all(ln.startswith("G01") for ln in inside) and lines[j + 1] == "G00 X34"
+    # Wendel: je Runde 1 mm tiefer (Zustellung T5), dann eine Runde auf Endtiefe, Viertelkreise (≤ 90°)
+    xs = [x for x in _vals("\n".join(inside), "X")]
+    assert xs[0] == pytest.approx(30) and min(xs) == pytest.approx(26)
+    ys = _vals("\n".join(inside), "Y")
+    viertel = 15 * math.pi / 2
+    steps = [b - a for a, b in zip(ys, ys[1:]) if abs(b - a) > 1e-6]
+    assert steps and max(steps) == pytest.approx(viertel, abs=0.002)
+    # Breite 6 mit Fräser Ø5: Bahnen bei Z-30 und ±0,5
+    zs = set(_vals("\n".join(inside), "Z"))
+    assert zs == {-30.0, -29.5, -30.5}
+    assert "G00 Y" not in blk  # Mantelnut braucht keine Y-Achse
+    assert "umlaufend" in res.arbeitsgaenge[-1]
+
+
+def test_open_groove_zigzag_and_fanuc():
+    pp = vorlage("fanuc")
+    pp.c_ein, pp.c_aus = "M35", "M34"
+    res = k.generate(walze(_mn([[-45, 30], [-50, 120]], b=5, t=2, strategie="senkrecht")), pp=pp)
+    assert res.ok, res.errors
+    blk = _block(res.code, "FRAESEN MANTELNUT 5X2")
+    assert "G19 W0 H0\nG07.1 C15.\nG01 X28. F150." in blk  # senkrecht eintauchen mit halbem Vorschub
+    cs = _vals(blk.split("G07.1 C15.")[1].split("G07.1 C0.")[0], "C")
+    assert min(cs) == pytest.approx(30) and max(cs) == pytest.approx(120)
+    # Ebene 2: am anderen Ende eintauchen und zurück (ohne Rückzug)
+    body = blk.split("G07.1 C15.")[1]
+    assert "G01 X26. F150." in body and body.index("C120.") < body.index("G01 X26.")
+
+
+def test_mantel_groove_errors():
+    pp = vorlage("sin_s3")
+    pp.zyl_ein = ""
+    res = k.generate(walze(_mn([[-30, 0], [-30, 360]])), pp=pp)
+    assert any("Zylinder-Interpolation" in e for e in res.errors)
+    res = k.generate(walze(_mn([[-30, 0]])))
+    assert any("Bahn fehlt" in e for e in res.errors)
+    res = k.generate(walze(_mn([[-1, 0], [-1, 360]], b=6)))
+    assert any("Stirnseite" in e for e in res.errors)
+    t = k.beispiel_teil()
+    t.tool(5).dm = 5
+    t.fraesungen = [_mn([[-15, 0], [-15, 360]])]
+    assert any("nicht auf einem Durchmesser" in e for e in k.generate(t).errors)
+    res = k.generate(walze(_mn([[-30, 0], [-30, 360]], b=4)))
+    assert any("breiter als die Nut" in e for e in res.errors)
+
+
+def test_mantel_groove_deburr_edges():
+    res = k.generate(walze(_mn([[-30, 0], [-30, 360]], b=6, t=2, deburr=True)))
+    assert res.ok, res.errors
+    d = _block(res.code, "ENTGRATEN MANTELNUT 6X2")
+    # Ringnut: zwei geschlossene Kanten bei Z-27 und Z-33, Spitze 0,3 unter der Kante (Wände quer zur Achse)
+    assert d.count("TRACYL(30)") == 2 and "G00 Z-27" in d and "G00 Z-33" in d
+    assert set(_vals(d.split("TRACYL(30)")[1].split("TRAFOOF")[0], "X")) == {29.4}
+    res = k.generate(walze(_mn([[-45, 30], [-50, 120]], b=5, t=1, deburr=True)))
+    assert res.ok, res.errors
+    d = _block(res.code, "ENTGRATEN MANTELNUT 5X1")
+    seg = d.split("TRACYL(30)")[1].split("TRAFOOF")[0]
+    ys = _vals(seg, "Y")
+    # offene Nut: eine Schleife mit Bögen außen um die Enden (über C120 bzw. unter C30 hinaus)
+    assert max(ys) > 15 * math.radians(120) + 2 and min(ys) < 15 * math.radians(30) - 2
+
+
+def test_mantel_groove_saved_and_loaded():
+    t = walze(_mn([[-20, 0], [-35, 180], [-20, 360]]))
+    t2 = k.Teil.from_dict(json.loads(json.dumps(t.to_dict())))
+    assert t2.fraesungen[0].bahn == [[-20.0, 0.0], [-35.0, 180.0], [-20.0, 360.0]]
+    assert k.generate(t2).code == k.generate(t).code

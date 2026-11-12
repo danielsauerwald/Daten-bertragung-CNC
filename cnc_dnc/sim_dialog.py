@@ -593,6 +593,15 @@ class SimulationDialog(Dialog):
         self._bild_pos = (half + px(self, 15) + (rw - fs.nz * cell) / 2, px(self, 50) + (rh - fs.ny * cell) / 2)
         self._bild = tk.PhotoImage(master=self, width=fs.nz * cell, height=fs.ny * cell)
         self.f_bild = cv.create_image(*self._bild_pos, image=self._bild, anchor="nw")
+        # Abwicklung des Mantels (Nut auf dem Mantel): Z nach rechts, C 0…360° nach oben
+        self._mbild = None
+        if fs.nc:
+            mcell = max(1, int(rw / max(1, fs.nz)))
+            schritt = max(1, int(math.ceil(fs.nc / max(1.0, rh))))
+            zeilen = int(math.ceil(fs.nc / schritt))
+            self._mgeo = (mcell, schritt, zeilen, half + px(self, 15) + (rw - fs.nz * mcell) / 2,
+                          px(self, 50) + (rh - zeilen) / 2)
+            self._mbild = tk.PhotoImage(master=self, width=fs.nz * mcell, height=zeilen)
         self.f_wz_r = cv.create_oval(0, 0, 0, 0, outline=FRAESER_FARBE, width=2)
         self.f_achse_r = cv.create_line(0, 0, 0, 0, fill=FRAESER_FARBE)
         self._fraes_dynamisch()
@@ -632,7 +641,7 @@ class SimulationDialog(Dialog):
                 cv.create_oval(bx - hr * s, by - hr * s, bx + hr * s, by + hr * s, fill=C["surface"],
                                outline=MATERIAL_RAND, tags=("loch",))
         d, e = richtung(winkel)
-        if op.lage == "radial":
+        if op.lage in ("radial", "mantel"):
             outer = max(x, fs.R) + 12
             corners = [(x, y - w.r), (outer, y - w.r), (outer, y + w.r), (x, y + w.r)]
             poly = []
@@ -653,6 +662,26 @@ class SimulationDialog(Dialog):
         a = round(winkel, 3)
         bx0, by0 = self._bild_pos
         cell = self._cell
+        if op.lage == "mantel" and self._mbild is not None:
+            mcell, schritt, zeilen, mx0, my0 = self._mgeo
+            cv.itemconfigure(self.f_bild, image=self._mbild)
+            cv.coords(self.f_bild, mx0, my0)
+            jetzt = time.perf_counter()
+            if not self._spielt or jetzt - self._bild_zeit > 0.04 or self.ab.fertig:
+                self._bild_zeit = jetzt
+                self._mantel_bild_fuellen()
+            tx = mx0 + (z - fs.z0) / fs.g * mcell
+            ty = my0 + zeilen - (winkel % 360.0) / fs.dc / schritt
+            rz = w.r / fs.g * mcell
+            rc = math.degrees(w.r / max(x, 1.0)) / fs.dc / schritt
+            cv.coords(self.f_wz_r, tx - rz, ty - rc, tx + rz, ty + rc)
+            cv.coords(self.f_achse_r, tx - 3, ty, tx + 3, ty)
+            cv.itemconfigure(self.f_titel_r, text="Abwicklung (Z nach rechts, C 0…360° nach oben) · dunkler = "
+                                                  "tiefer · Werkzeug C{:.1f}° X{:.2f}".format(winkel % 360.0, 2 * x))
+            return
+        if self._mbild is not None:
+            cv.itemconfigure(self.f_bild, image=self._bild)
+            cv.coords(self.f_bild, *self._bild_pos)
         if op.lage == "radial" and a in fs.h:
             # Draufsicht neu aufbauen ist teuer: beim Abspielen höchstens ~12-mal je Sekunde
             jetzt = time.perf_counter()
@@ -670,6 +699,31 @@ class SimulationDialog(Dialog):
             cv.coords(self.f_wz_r, 0, 0, 0, 0)
             cv.coords(self.f_achse_r, 0, 0, 0, 0)
             cv.itemconfigure(self.f_titel_r, text="Stirnbohrung C{:g}° · Tiefe Z{:.2f}".format(winkel, z))
+
+    def _mantel_bild_fuellen(self) -> None:
+        """Abwicklung malen – nur den geänderten Z-Streifen, wenn möglich."""
+        fs = self.fs
+        mcell, schritt, zeilen, _x0, _y0 = self._mgeo
+        pal = _palette()
+        stand = ("mantel", fs.generation, id(self._mbild))
+        teil = fs.geaendert.pop("mantel", None)
+        if getattr(self, "_mbild_stand", None) == stand and teil is not None:
+            i0, i1 = teil
+        elif getattr(self, "_mbild_stand", None) == stand:
+            return
+        else:
+            i0, i1 = 0, fs.nz - 1
+        self._mbild_stand = stand
+        rows = []
+        for zr in range(zeilen - 1, -1, -1):
+            kc = min(fs.nc - 1, zr * schritt)
+            cols = []
+            for iz in range(i0, i1 + 1):
+                h = fs.mh[iz][kc]
+                c = "#FFFFFF" if h <= 0 else _mantel_farbe(pal, fs.mh_orig[iz][kc] - h)
+                cols.extend([c] * mcell)
+            rows.append("{" + " ".join(cols) + "}")
+        self._mbild.put(" ".join(rows), to=(i0 * mcell, 0))
 
     def _bild_fuellen(self, grid, orig, winkel: Optional[float] = None) -> None:
         """Draufsicht malen – nur den seit dem letzten Mal geänderten Streifen, wenn möglich."""
@@ -701,6 +755,10 @@ class SimulationDialog(Dialog):
             row = "{" + " ".join(cols) + "}"
             rows.extend([row] * cell)
         self._bild.put(" ".join(rows), to=(i0 * cell, 0))
+
+
+def _mantel_farbe(pal: List[str], tiefe: float) -> str:
+    return pal[min(len(pal) - 1, int(tiefe / 4.0 * (len(pal) - 1) + 0.5))] if tiefe > 0.03 else MATERIAL
 
 
 _PAL: List[str] = []

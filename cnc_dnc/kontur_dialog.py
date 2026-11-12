@@ -71,7 +71,45 @@ def _feature_text(fr: Fraesung) -> str:
                                                  fmt(min(fr.z1, fr.z2)))
     if fr.art == "bohrung_radial":
         return "Ø{} × {}  ·  Z{}".format(fmt(fr.mass), fmt(fr.tiefe), fmt(fr.z1))
+    if fr.art == "mantelnut":
+        return "{} × {} tief  ·  {}".format(fmt(fr.mass), fmt(fr.tiefe), bahn_text(fr))
     return "Ø{} × {}  ·  Lochkreis Ø{}".format(fmt(fr.mass), fmt(fr.tiefe), fmt(fr.teilkreis))
+
+
+def bahn_art(fr: Fraesung) -> str:
+    """„ring“ (ganz herum, gleiches Z), „gerade“ (Anfang → Ende) oder „punkte“."""
+    b = fr.bahn
+    if len(b) == 2:
+        if abs(b[0][0] - b[1][0]) < 1e-6 and abs(abs(b[1][1] - b[0][1]) - 360.0) < 1e-6:
+            return "ring"
+        return "gerade"
+    return "punkte"
+
+
+def umlaufend(fr: Fraesung) -> bool:
+    """Bahn schließt sich ganz herum (gleiches Z am Anfang und Ende, C um ein Vielfaches von 360°)."""
+    b = fr.bahn
+    if len(b) < 2 or abs(b[0][0] - b[-1][0]) > 1e-6:
+        return False
+    d = abs(b[-1][1] - b[0][1])
+    return d >= 360 - 1e-6 and abs(((d + 1e-6) % 360.0)) < 2e-6
+
+
+def bahn_text(fr: Fraesung) -> str:
+    b = fr.bahn
+    if not b:
+        return "Bahn fehlt"
+    art = bahn_art(fr)
+    if art == "ring":
+        return "umlaufend bei Z{}".format(fmt(b[0][0]))
+    if art == "gerade":
+        return "Z{} C{}° → Z{} C{}°".format(fmt(b[0][0]), fmt(b[0][1]), fmt(b[1][0]), fmt(b[1][1]))
+    return "{} Punkte, Z{} … Z{}{}".format(len(b), fmt(max(p[0] for p in b)), fmt(min(p[0] for p in b)),
+                                         ", umlaufend" if umlaufend(fr) else "")
+
+
+BAHN_ARTEN = {"ring": "umlaufend (Ringnut, 360°)", "gerade": "von – bis (schräg / Wendel)",
+              "punkte": "Punkte (Kurvenbahn)"}
 
 
 def _ecke_text(p: KPunkt, teil: Teil) -> str:
@@ -146,14 +184,17 @@ class FeatureDialog(Dialog):
             self._entry("mass", "Durchmesser", fmt(fr.mass))
             self._entry("tiefe", "Tiefe (Spitze)", fmt(fr.tiefe))
             self._entry("z1", "Z der Oberfläche", fmt(fr.z1), "meist 0 (Stirnseite)")
-        self._entry("winkel", "Winkel C (°)", winkel_text(fr.winkel), "z. B. 0 180  oder  0 120 240")
-        quick = tk.Frame(body, bg=bg)
-        quick.grid(row=self._row, column=1, columnspan=2, sticky="w", pady=(0, px(self, 6)))
-        tk.Label(quick, text="gleichmäßig:", bg=bg, fg=C["muted"], font=fonts.small).pack(side="left")
-        for n in (1, 2, 3, 4, 6):
-            ttk.Button(quick, text="{}×".format(n), style="Small.TButton", width=3,
-                       command=lambda n=n: self._spread(n)).pack(side="left", padx=(px(self, 6), 0))
-        self._row += 1
+        elif art == "mantelnut":
+            self._mantel_felder(fr)
+        if art != "mantelnut":
+            self._entry("winkel", "Winkel C (°)", winkel_text(fr.winkel), "z. B. 0 180  oder  0 120 240")
+            quick = tk.Frame(body, bg=bg)
+            quick.grid(row=self._row, column=1, columnspan=2, sticky="w", pady=(0, px(self, 6)))
+            tk.Label(quick, text="gleichmäßig:", bg=bg, fg=C["muted"], font=fonts.small).pack(side="left")
+            for n in (1, 2, 3, 4, 6):
+                ttk.Button(quick, text="{}×".format(n), style="Small.TButton", width=3,
+                           command=lambda n=n: self._spread(n)).pack(side="left", padx=(px(self, 6), 0))
+            self._row += 1
         arten = ("bohrer", "fraeser") if art.startswith("bohrung") else ("fraeser",)
         lage = FEATURE_LAGE[art]
         choices = _tool_choices(teil, arten, lage)
@@ -183,6 +224,64 @@ class FeatureDialog(Dialog):
         ttk.Button(bar, text="Abbrechen", command=self.cancel).pack(side="right", padx=(0, px(self, 12)))
         self.bind("<Return>", lambda e: self.ok())
         self._toggle()
+
+    def _mantel_felder(self, fr: Fraesung) -> None:
+        """Bahn der Nut auf dem Mantel: umlaufend, von–bis oder Punkte (Z und C auf der Abwicklung)."""
+        b = fr.bahn or [[-10.0, 0.0], [-10.0, 360.0]]
+        art = bahn_art(Fraesung(art="mantelnut", bahn=b))
+        self._combo("bahn_art", "Bahn", BAHN_ARTEN[art], list(BAHN_ARTEN.values()))
+        self.vars["bahn_art"].trace_add("write", lambda *a: self._bahn_umschalten())
+        self.bahn_widgets: Dict[str, list] = {"ring": [], "gerade": [], "punkte": []}
+        self._entry("z_a", "Z Anfang", fmt(b[0][0]), "Mitte der Nut", keep=self.bahn_widgets["gerade"])
+        self.bahn_widgets["ring"].extend(self.bahn_widgets["gerade"][:])
+        self._entry("c_a", "C Anfang (°)", fmt(b[0][1]), keep=self.bahn_widgets["gerade"])
+        self._entry("z_e", "Z Ende", fmt(b[-1][0]), keep=self.bahn_widgets["gerade"])
+        self._entry("c_e", "C Ende (°)", fmt(b[-1][1]), "über 360 = mehrere Umdrehungen (Wendel)",
+                    keep=self.bahn_widgets["gerade"])
+        lab = self._label("Punkte", "je Zeile: Z  C   (C in Grad)")
+        self.punkte = tk.Text(self.body, font=(MONO_FAMILY, 11), height=6, width=22, relief="flat",
+                              highlightthickness=1, highlightbackground=C["border"])
+        self.punkte.grid(row=self._row, column=1, columnspan=2, sticky="w", pady=px(self, 4))
+        self.punkte.insert("1.0", "\n".join("{}  {}".format(fmt(z), fmt(c)) for z, c in b))
+        self.bahn_widgets["punkte"].extend([lab, self.punkte])
+        self._row += 1
+        self._entry("mass", "Breite", fmt(fr.mass))
+        self._entry("tiefe", "Tiefe", fmt(fr.tiefe), "ab Außendurchmesser")
+        self.after_idle(self._bahn_umschalten)
+
+    def _bahn_art(self) -> str:
+        return _inv(BAHN_ARTEN).get(self.vars["bahn_art"].get(), "ring")
+
+    def _bahn_umschalten(self) -> None:
+        art = self._bahn_art()
+        alle = {id(w): w for ws in self.bahn_widgets.values() for w in ws}
+        sichtbar = {id(w) for w in self.bahn_widgets[art]}
+        for key, w in alle.items():
+            if key in sichtbar:
+                w.grid()
+            else:
+                w.grid_remove()
+
+    def _bahn_lesen(self) -> List[List[float]]:
+        """Bahn aus den Feldern; ValueError mit Meldung bei Unsinn."""
+        art = self._bahn_art()
+        if art == "punkte":
+            out = []
+            for ln in self.punkte.get("1.0", "end").splitlines():
+                teile = ln.replace(";", " ").split()
+                if not teile:
+                    continue
+                if len(teile) < 2:
+                    raise ValueError("Je Zeile Z und C eintragen, z. B. „-20  90“.")
+                out.append([parse_num(teile[0]), parse_num(teile[1])])
+            if len(out) < 2:
+                raise ValueError("Mindestens zwei Punkte eintragen.")
+            return out
+        z_a, c_a = parse_num(self.vars["z_a"].get()), parse_num(self.vars["c_a"].get())
+        if art == "ring":
+            return [[z_a, c_a], [z_a, c_a + 360.0]]
+        z_e, c_e = parse_num(self.vars["z_e"].get()), parse_num(self.vars["c_e"].get())
+        return [[z_a, c_a], [z_e, c_e]]
 
     def _label(self, text: str, hint: str = "") -> tk.Frame:
         bg = C["surface"]
@@ -243,11 +342,20 @@ class FeatureDialog(Dialog):
         except ValueError:
             self.msg.configure(text="Bitte nur Zahlen eintragen (Komma oder Punkt).")
             return
-        try:
-            fr.winkel = parse_winkel(self.vars["winkel"].get())
-        except ValueError:
-            self.msg.configure(text="Winkel fehlen, z. B. „0 180“.")
-            return
+        if fr.art == "mantelnut":
+            try:
+                fr.bahn = self._bahn_lesen()
+            except ValueError as exc:
+                self.msg.configure(text=str(exc) if str(exc) and not str(exc).startswith("could") else
+                                   "Bahn: bitte nur Zahlen eintragen (Komma oder Punkt).")
+                return
+            fr.winkel = [fr.bahn[0][1]]
+        else:
+            try:
+                fr.winkel = parse_winkel(self.vars["winkel"].get())
+            except ValueError:
+                self.msg.configure(text="Winkel fehlen, z. B. „0 180“.")
+                return
         wz = _tool_from_choice(self.vars["wz"].get())
         if wz is None:
             self.msg.configure(text="Bitte ein Werkzeug wählen (Liste im Reiter „Werkzeuge“).")
@@ -521,8 +629,8 @@ class KonturDialog(Dialog):
                           ("+ Bohr. radial", lambda: self.add_feature("bohrung_radial")),
                           ("+ Bohr. Stirn", lambda: self.add_feature("bohrung_axial"))])
         tk.Frame(f, bg=C["surface"], height=px(self, 6)).pack()
-        self._buttons(f, [("Ändern …", self.edit_feature), ("Entgraten ein/aus", self.toggle_deburr),
-                          ("Löschen", self.delete_feature)])
+        self._buttons(f, [("+ Mantelnut", lambda: self.add_feature("mantelnut")), ("Ändern …", self.edit_feature),
+                          ("Entgraten", self.toggle_deburr), ("Löschen", self.delete_feature)])
         self._shrink_list_first(f, self.ft_tree)
 
     def _tab_werkzeuge(self) -> None:
@@ -1114,6 +1222,11 @@ class KonturDialog(Dialog):
             fr.z1 = (fr.z1 + fr.z2) / 2 if seg is not None else -5.0
             fr.mass, fr.tiefe = 5.0, round(d / 2, 1) or 5.0
             fr.winkel = [0.0]
+        elif art == "mantelnut":
+            zm = round((fr.z1 + fr.z2) / 2, 1) if seg is not None else -5.0
+            fr.bahn = [[zm, 0.0], [zm, 360.0]]
+            fr.mass, fr.tiefe = 6.0, 2.0
+            fr.winkel = [0.0]
         else:
             fr.z1 = 0.0
             fr.mass, fr.tiefe, fr.teilkreis = 5.0, 8.0, round(d * 0.6)
@@ -1305,6 +1418,8 @@ class KonturDialog(Dialog):
                 self._bar_button("Fläche", lambda: self.add_feature("flaeche", i))
                 self._bar_button("Nut", lambda: self.add_feature("nut", i))
                 self._bar_button("Bohrung", lambda: self.add_feature("bohrung_radial", i))
+                if abs(a.x - b.x) < 1e-9:  # Zylinder: Nut ganz herum / als Kurve
+                    self._bar_button("Mantelnut", lambda: self.add_feature("mantelnut", i))
         elif kind == "corner":
             p = t.punkte[i]
             self.sel_label.configure(text="Punkt {}:  X{} Z{}{}".format(
@@ -1407,6 +1522,7 @@ class KonturDialog(Dialog):
         dims = masse(t)
         stock_end = dims["rohteil"][1] if dims["rohteil"] else None
         z_last = min([p.z for p in t.punkte] + [min(f.z1, f.z2) for f in t.fraesungen if f.art in ("flaeche", "nut")]
+                     + [p_[0] - f.mass / 2 for f in t.fraesungen if f.art == "mantelnut" for p_ in f.bahn]
                      + [f.z1 for f in t.fraesungen if f.art == "bohrung_radial"] + [p.z for p in t.innen]
                      + ([-t.bohr_tiefe] if t.bohr_d > 0 and t.bohr_tiefe > 0 else [])
                      + ([stock_end] if stock_end is not None else []))
@@ -1698,6 +1814,21 @@ class KonturDialog(Dialog):
                 else t.rohteil_d / 2
             a, b = P(fr.z1 - fr.mass / 2, rp), P(fr.z1 + fr.mass / 2, rp - fr.tiefe)
             label = "Ø{}".format(fmt(fr.mass))
+        elif fr.art == "mantelnut":
+            if not fr.bahn:
+                return
+            zs = [p_[0] for p_ in fr.bahn]
+            z_lo, z_hi = min(zs) - fr.mass / 2, max(zs) + fr.mass / 2
+            rp = contour_radius(t, self.geom, z_lo, z_hi) if self.geom.elems else t.rohteil_d / 2
+            a, b = P(z_lo, rp), P(z_hi, rp - fr.tiefe)
+            x0, y0 = min(a[0], b[0]), min(a[1], b[1])
+            x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+            cv.create_rectangle(x0, y0, x1, max(y1, y0 + 2), fill=FEAT_COLOR, stipple="gray25", outline=outline,
+                                width=width, dash=(4, 2), tags=(tag,))
+            cv.create_text((x0 + x1) / 2, max(y1, y0 + 2) + px(self, 3), anchor="n", fill=outline,
+                           font=self.fonts.small, tags=(tag,),
+                           text="Mantelnut {} · {}".format(fmt(fr.mass), "umlaufend" if umlaufend(fr) else "Bahn"))
+            return
         else:
             rc = fr.teilkreis / 2
             a, b = P(fr.z1 - fr.tiefe, rc + fr.mass / 2), P(fr.z1, rc - fr.mass / 2)
@@ -1744,6 +1875,22 @@ class KonturDialog(Dialog):
         for j, fr in enumerate(t.fraesungen):
             tag = "feat{}".format(j)
             color = SEL_COLOR if self.sel == ("feat", j) else FEAT_COLOR
+            if fr.art == "mantelnut":
+                if not fr.bahn:
+                    continue
+                zs = [p_[0] for p_ in fr.bahn]
+                rp = contour_radius(t, self.geom, min(zs) - fr.mass / 2, max(zs) + fr.mass / 2) \
+                    if self.geom.elems else R
+                cs = [p_[1] for p_ in fr.bahn]
+                c0, c1 = min(cs), max(cs)
+                rm = (rp - fr.tiefe / 2) * s
+                if c1 - c0 >= 360 - 1e-6:
+                    cv.create_oval(cx - rm, cy - rm, cx + rm, cy + rm, outline=color,
+                                   width=max(px(self, 3), fr.tiefe * s), tags=(tag,))
+                else:  # Canvas: Winkel gegen Uhrzeiger ab 3 Uhr; C=0 oben, C+ gegen Uhrzeiger
+                    cv.create_arc(cx - rm, cy - rm, cx + rm, cy + rm, start=90 + c0, extent=c1 - c0,
+                                  style="arc", outline=color, width=max(px(self, 3), fr.tiefe * s), tags=(tag,))
+                continue
             if fr.art in ("flaeche", "nut"):
                 z_hi, z_lo = min(0.0, max(fr.z1, fr.z2)), min(fr.z1, fr.z2)
                 rp = contour_radius(t, self.geom, z_lo, z_hi) if self.geom.elems else R

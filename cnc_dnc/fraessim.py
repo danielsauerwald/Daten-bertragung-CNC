@@ -8,6 +8,8 @@ Modell
 * Werkzeuge: Schaftfräser (ebene Stirn), Bohrer (Spitze 118°/140°), Fasenfräser (90°-Kegel).
   Unter dem Werkzeug wird die Höhe auf dessen Unterkante begrenzt.
 * Stirnbohrungen (axial) werden als Bohrungen im Stirnschnitt mitgeführt.
+* Nuten auf dem Mantel (Zylinder-Interpolation): eigenes Raster auf der Abwicklung (Z × C) mit dem
+  Radius der Oberfläche je Zelle; der Fräser steht radial unter dem Winkel C.
 
 Gemeldet werden Eilgang ins Material und – nach jedem Arbeitsgang – Abweichungen von der
 Soll-Form (Restmaterial, zu tief oder außerhalb gefräst).
@@ -39,9 +41,14 @@ class FSchritt:
     b: P3
     eil: bool
     zeile: int
+    mantel: bool = False  # a/b = (Radius, C in Grad, z)
 
     @property
     def laenge(self) -> float:
+        if self.mantel:
+            r = (self.a[0] + self.b[0]) / 2
+            return math.sqrt((self.b[0] - self.a[0]) ** 2 + (r * math.radians(self.b[1] - self.a[1])) ** 2
+                             + (self.b[2] - self.a[2]) ** 2)
         return math.sqrt(sum((self.b[k] - self.a[k]) ** 2 for k in range(3)))
 
 
@@ -86,6 +93,10 @@ class FraesSimulation:
         self.yc = [self.y0 + (j + 0.5) * g for j in range(self.ny)]
         self.rz = [self._r(z) for z in self.zc]
         self.winkel = sorted({round(a, 3) for op in self.ops if op.lage == "radial" for a in op.winkel})
+        # Mantel-Raster (Abwicklung): Zellen von etwa g Bogenlänge am Außendurchmesser
+        self.mit_mantel = any(op.lage == "mantel" for op in self.ops)
+        self.nc = max(180, int(math.ceil(2 * math.pi * max(self.R, 1.0) / g))) if self.mit_mantel else 0
+        self.dc = 360.0 / self.nc if self.nc else 0.0
         self.soll = [self._sollwerte(op) for op in self.ops]
         self.schritte = self._schritte()
         self.reset()
@@ -101,6 +112,9 @@ class FraesSimulation:
         out: List[FSchritt] = []
         for oi, op in enumerate(self.ops):
             x, y, z = self.pp_wechsel[0] / 2, 0.0, self.pp_wechsel[2]
+            if op.lage == "mantel":
+                out.extend(self._mantel_schritte(oi, op))
+                continue
             for wi, _a in enumerate(op.winkel):
                 for mi, mv in enumerate(op.moves):
                     nx = x if mv.x is None else mv.x / 2.0
@@ -117,6 +131,25 @@ class FraesSimulation:
                     x, y, z = nx, ny, nzz
         return out
 
+    def _mantel_schritte(self, oi: int, op: FraesOp) -> List[FSchritt]:
+        out: List[FSchritt] = []
+        r, c, z = self.pp_wechsel[0] / 2, op.winkel[0], self.pp_wechsel[2]
+        for mi, mv in enumerate(op.moves):
+            nr = r if mv.x is None else mv.x / 2.0
+            nc = c if mv.c is None else mv.c
+            nz = z if mv.z is None else mv.z
+            line = op.zeilen[0] + mi if op.zeilen else -1
+            probe = FSchritt(oi, 0, (r, c, z), (nr, nc, nz), mv.kind == "G0", line, True)
+            ln = probe.laenge
+            if ln > 1e-9:
+                n = max(1, int(math.ceil(ln / (STUECK_G0 if mv.kind == "G0" else STUECK_G1) - 1e-9)))
+                for k in range(n):
+                    a = (r + (nr - r) * k / n, c + (nc - c) * k / n, z + (nz - z) * k / n)
+                    b = (r + (nr - r) * (k + 1) / n, c + (nc - c) * (k + 1) / n, z + (nz - z) * (k + 1) / n)
+                    out.append(FSchritt(oi, 0, a, b, mv.kind == "G0", line, True))
+            r, c, z = nr, nc, nz
+        return out
+
     # -- Ablauf ------------------------------------------------------------------
 
     def reset(self) -> None:
@@ -128,6 +161,8 @@ class FraesSimulation:
                 grid.append([math.sqrt(r * r - y * y) if abs(y) < r else NONE for y in self.yc])
             self.h[a] = grid
         self.orig = {a: [row[:] for row in grid] for a, grid in self.h.items()}
+        self.mh = [[self.rz[iz]] * self.nc for iz in range(self.nz)] if self.nc else []
+        self.mh_orig = [row[:] for row in self.mh]
         self.bohrungen: List[Tuple[float, float, float, float]] = []  # (winkel, x, r, tiefste z)
         self._vorher: Dict[Tuple[int, int], List[List[float]]] = {}
         # geänderter Z-Bereich (Rasterindex von/bis) je Winkellage – die Anzeige malt nur den neu
@@ -171,7 +206,10 @@ class FraesSimulation:
             return None
         st = self.schritte[max(0, min(self.i, len(self.schritte)) - 1)]
         op = self.ops[st.op]
-        return op, self.werkzeuge[st.op], op.winkel[st.wi], (st.b if self.i > 0 else st.a)
+        p = st.b if self.i > 0 else st.a
+        if st.mantel:  # Werkzeug radial unter C
+            return op, self.werkzeuge[st.op], p[1], (p[0], 0.0, p[2])
+        return op, self.werkzeuge[st.op], op.winkel[st.wi], p
 
     # -- Abtrag ------------------------------------------------------------------
 
@@ -185,6 +223,9 @@ class FraesSimulation:
     def _schritt(self, idx: int, st: FSchritt) -> None:
         op = self.ops[st.op]
         w = self.werkzeuge[st.op]
+        if st.mantel:
+            self._mantel_schritt(idx, st, w)
+            return
         a = round(op.winkel[st.wi], 3)
         if op.lage == "axial":
             if not st.eil and st.b[2] < st.a[2]:
@@ -280,6 +321,53 @@ class FraesSimulation:
                     if st.eil and hv - bottom > TOL:
                         self._eil(idx, st, self.zc[iz], bottom)
                     row[j] = bottom
+
+    def _mantel_schritt(self, idx: int, st: FSchritt, w: FWerkzeug) -> None:
+        (ra, ca, za), (rb, cb, zb) = st.a, st.b
+        if min(ra, rb) >= self.R + 0.01:
+            return  # über dem Teil
+        lo = max(0, int((min(za, zb) - w.r - self.z0) / self.g) - 1)
+        hi = min(self.nz - 1, int((max(za, zb) + w.r - self.z0) / self.g) + 1)
+        g_alt = self.geaendert.get("mantel")
+        self.geaendert["mantel"] = [lo, hi] if g_alt is None else [min(g_alt[0], lo), max(g_alt[1], hi)]
+        n = max(1, int(math.ceil(st.laenge / (self.g / 2 if w.k else self.g))))
+        for k in range(1, n + 1):
+            t = k / n
+            self._mantel_abdruck(idx, st, w, ra + (rb - ra) * t, ca + (cb - ca) * t, za + (zb - za) * t)
+
+    def _mantel_abdruck(self, idx: int, st: FSchritt, w: FWerkzeug, r_tip: float, c: float, z: float) -> None:
+        """Radial stehender Fräser (Spitze bei r_tip unter dem Winkel c): je Zelle Radius der Oberfläche begrenzen.
+        Eine Zelle wird bearbeitet, wenn ihr Oberflächenpunkt seitlich innerhalb des Fräsers liegt."""
+        g, rho, kk, dc = self.g, w.r, w.k, self.dc
+        i0 = max(0, int((z - rho - self.z0) / g))
+        i1 = min(self.nz, int((z + rho - self.z0) / g) + 2)
+        half = math.degrees(math.asin(min(1.0, rho / max(r_tip, rho, 1e-6)))) + dc
+        k0 = int(math.floor((c - half) / dc))
+        k1 = int(math.ceil((c + half) / dc))
+        nc = self.nc
+        for iz in range(i0, i1):
+            dz = self.zc[iz] - z
+            if abs(dz) > rho:
+                continue
+            row = self.mh[iz]
+            for kk_ in range(k0, k1 + 1):
+                ki = kk_ % nc
+                old = row[ki]
+                if old <= 0:
+                    continue
+                dth = math.radians((kk_ + 0.5) * dc - c)
+                lat = math.sqrt(dz * dz + (old * math.sin(dth)) ** 2)
+                if lat > rho:
+                    continue
+                cosd = math.cos(dth)
+                if cosd < 0.05:
+                    continue
+                cut = (r_tip + kk * lat) / cosd if kk else r_tip / cosd
+                if cut < old:
+                    if st.eil and old - cut > TOL:
+                        self._melde("eilgang", idx, st, self.zc[iz], cut, "T{}: Eilgang ins Material "
+                                    "(C{:.1f}, Z{:.2f}).".format(self.ops[st.op].t, c, self.zc[iz]))
+                    row[ki] = max(0.0, cut)
 
     def _eil(self, idx: int, st: FSchritt, z: float, x: float) -> None:
         self._melde("eilgang", idx, st, z, x, "T{}: Eilgang ins Material (C{:g}, Z{:.2f}).".format(
@@ -384,6 +472,33 @@ class FraesSimulation:
 
     # -- Anzeige --------------------------------------------------------------------
 
+    def mantel_abtrag(self, iz: int, r_top: float) -> List[List[Tuple[float, float]]]:
+        """Weggefräste Bereiche des Mantel-Rasters im Querschnitt (Stirnansicht)."""
+        out: List[List[Tuple[float, float]]] = []
+        if not self.nc:
+            return out
+        row, orig, dc = self.mh[iz], self.mh_orig[iz], self.dc
+
+        def glob(r: float, deg: float) -> Tuple[float, float]:
+            d, _e = richtung(deg)
+            return r * d[0], r * d[1]
+
+        k = 0
+        while k < self.nc:
+            if not (row[k] < orig[k] - 1e-6):
+                k += 1
+                continue
+            start = k
+            while k < self.nc and row[k] < orig[k] - 1e-6:
+                k += 1
+            unten = []
+            for m in range(start, k):
+                unten.append(glob(row[m], m * dc))
+                unten.append(glob(row[m], (m + 1) * dc))
+            oben = [glob(r_top, m * dc) for m in range(k, start - 1, -1)]
+            out.append(unten + oben)
+        return out
+
     def abtrag(self, z: float, zugabe: float = 0.05) -> List[List[Tuple[float, float]]]:
         """Weggefräste Flächen im Querschnitt bei z (Stirnansicht, x nach rechts, y nach oben).
 
@@ -421,6 +536,7 @@ class FraesSimulation:
                     yk = self.y0 + k * g
                     oben.append(glob(math.sqrt(max(0.0, r_top * r_top - yk * yk)), yk))
                 out.append(unten + oben)
+        out.extend(self.mantel_abtrag(iz, r_top))
         return out
 
     def schnitt(self, z: float, strahlen: int = 180) -> List[Tuple[float, float]]:

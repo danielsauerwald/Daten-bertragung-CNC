@@ -181,3 +181,36 @@ def test_tracyl_deburr_simulates_with_chamfer_on_walls():
     fase = {round(sim.yc[j], 1): orig[j] - row[j] for j in range(sim.ny) if 3.0 < abs(sim.yc[j]) < 3.6}
     assert fase[3.1] > 0.1 and fase[-3.1] > 0.1  # Kante gebrochen
     assert fase[3.5] < 0.01  # aber keine große Fase
+
+
+def test_mantel_groove_simulation():
+    """Kurvennut ganz herum (Z-20 → Z-35 → Z-20) und offene Nut: Tiefe und Breite im Mantel-Raster."""
+    t = k.neues_teil()
+    t.rohteil_d, t.rohteil_l = 32.0, 70.0
+    t.punkte = [k.KPunkt(0, 0), k.KPunkt(30, 0, "fase", 1), k.KPunkt(30, -60)]
+    t.tool(5).dm = 5
+    t.fraesungen = [k.Fraesung("mantelnut", [0.0], 0, 0, 5, 2, 0, 5, True, 7, 0.3,
+                               bahn=[[-20, 0], [-35, 180], [-20, 360]]),
+                    k.Fraesung("mantelnut", [30.0], 0, 0, 6, 1, 0, 5, bahn=[[-45, 30], [-50, 120]])]
+    res = k.generate(t, rahmen=True)
+    assert res.ok, res.errors
+    assert [o.lage for o in res.fraes_ops] == ["mantel", "mantel", "mantel"]
+    sim = FraesSimulation(t, res)
+    sim.bis_ende()
+    assert not [e for e in sim.ereignisse if e.schwer], [e.text for e in sim.ereignisse]
+
+    def tiefe(z, c):
+        iz = int((z - sim.z0) / sim.g)
+        kc = int(c / sim.dc) % sim.nc
+        return sim.mh_orig[iz][kc] - sim.mh[iz][kc]
+
+    assert tiefe(-20, 0) == pytest.approx(2.0, abs=0.02)
+    assert tiefe(-35, 180) == pytest.approx(2.0, abs=0.02)
+    assert tiefe(-27.5, 90) == pytest.approx(2.0, abs=0.02)
+    assert tiefe(-23.2, 0) == pytest.approx(0.0, abs=0.02)  # neben der Nut (Breite 5)
+    assert tiefe(-47.5, 75) == pytest.approx(1.0, abs=0.02)
+    assert tiefe(-55, 75) == pytest.approx(0.0, abs=0.02)
+    # Querschnitt zeigt die Nut, Werkzeugposition mit C
+    assert sim.abtrag(-27.5)
+    op, w, winkel, (x, y, z) = sim.position
+    assert op.lage == "mantel" and y == 0.0
