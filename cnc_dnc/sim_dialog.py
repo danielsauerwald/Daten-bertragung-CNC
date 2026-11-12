@@ -610,9 +610,20 @@ class SimulationDialog(Dialog):
         z_cut = min(z, -0.05)
         r_now = max(0.0, fs._r(z_cut))
         cv.coords(self.f_kreis, cx - r_now * s, cy - r_now * s, cx + r_now * s, cy + r_now * s)
-        pts = fs.schnitt(z_cut, 120)
-        flat = [c for px_, py_ in pts for c in (cx + px_ * s, cy - py_ * s)]
-        cv.coords(self.f_schnitt, *(flat if len(flat) >= 6 else [0, 0, 0, 0, 0, 0]))
+        # Querschnitt: voller Kreis als Material, darüber die weggefrästen Bereiche in Hintergrundfarbe.
+        # Erst alle Ränder, dann alle Flächen ohne Rand – so bleiben nur die Kanten zum Material sichtbar.
+        kreis = [c for k in range(180) for c in (cx + r_now * s * math.cos(2 * math.pi * k / 180),
+                                                  cy - r_now * s * math.sin(2 * math.pi * k / 180))]
+        cv.coords(self.f_schnitt, *(kreis if r_now > 0 else [0, 0, 0, 0, 0, 0]))
+        cv.delete("abtrag")
+        polys = [[c for px_, py_ in poly for c in (cx + px_ * s, cy - py_ * s)] for poly in fs.abtrag(z_cut)]
+        polys = [p for p in polys if len(p) >= 6]
+        bg = cv.cget("bg")
+        for p in polys:
+            cv.create_polygon(*p, fill="", outline=MATERIAL_RAND, width=2, tags=("abtrag",))
+        for p in polys:
+            cv.create_polygon(*p, fill=bg, outline="", tags=("abtrag",))
+        cv.tag_raise("abtrag", self.f_schnitt)
         cv.delete("loch")
         for a, hx, hr, hz in fs.bohrungen:
             if hz < z_cut:

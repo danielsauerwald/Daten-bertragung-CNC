@@ -1,4 +1,4 @@
-# CNC-Datenübertragung 2.13
+# CNC-Datenübertragung 2.14
 
 Programm zum **Senden** von CNC-Programmen an die Maschine und zum **Empfangen**
 (Zurückholen) von der Maschine über die serielle Schnittstelle (RS-232 / COM-Port).
@@ -352,7 +352,9 @@ aus ihrem [Postprozessor](#postprozessor-pro-maschine) (Sinumerik oder Fanuc).
    Die **Winkel C** trägt man einfach ein (`0 180`, `0 120 240`) oder verteilt sie mit
    **2× / 3× / 4× / 6×** gleichmäßig. Die **Stirnansicht** rechts in der Zeichnung zeigt die
    Lagen (0° oben). „Kanten entgraten“ fährt danach mit einem 90°-Fasenfräser die Kanten der
-   Fläche/Nut ab bzw. senkt die Bohrungen an.
+   Fläche/Nut ab bzw. senkt die Bohrungen an. Kanten auf der **Mantelfläche** (Nut, Bögen am
+   Flächenende) werden dabei mit **Zylinder-Interpolation** entgratet – die Spindel dreht mit,
+   siehe unten.
    Im Fenster einer Fräsung wählt man auch die **Strategie**:
 
    | Fräsung | Strategien |
@@ -411,6 +413,33 @@ G01 Y10.268
 SPOS=DC(180)
 …
 ```
+
+Entgraten auf der Mantelfläche – die C-Achse interpoliert mit X und Z (Siemens `TRACYL`, Fanuc
+`G07.1`). Der Fasenfräser steht immer radial; programmiert wird auf der Abwicklung (Siemens: Y in mm,
+Fanuc: C in Grad). Weil die Nutwände parallel (mit der Y-Achse gefräst) und nicht radial stehen,
+taucht er an den Längswänden etwas tiefer ein, damit die Fase dort die eingestellte Größe hat:
+
+```
+;ENTGRATEN NUT 6X3 FASENFRAESER 90
+T07D1 G94 G19 M8
+M5
+SPOS=DC(13.342)
+S3=4000 M3=3
+G00 Z-19.5
+G00 X30
+TRACYL(26)
+G01 X25.278 F400
+G01 Y3.027 Z-22.5
+G01 X25.284 Y2.94 Z-23.147
+…
+TRAFOOF
+G00 X30
+```
+
+C wird vor dem Einschalten positioniert, im Zylinderbetrieb gibt es nur `G01` (Fanuc erlaubt dort kein
+`G00`), erst ausschalten, dann frei fahren. Die gerade Kante einer Fläche an der Stirnseite folgt danach
+mit stehender Spindel und Y-Achse. Hat eine Maschine keine Zylinder-Interpolation, nimmt man im
+Postprozessor (Reiter „Mantel“) den Haken weg – dann wird wie früher mit X/Y/Z entgratet.
 
 Die Eingaben zum Teil werden gemerkt (`kontur.json` neben der `config.json`).
 
@@ -535,9 +564,13 @@ Einstellbar sind:
 - **C-/Y-Achse, angetriebenes Werkzeug**: Vorschub mm/min (`G94`/`G98`), Ebenen radial/axial
   (`G19`/`G17`), C-Achse ein/aus, Spindel positionieren (`{W}` = Winkel), Klemmen/Lösen,
   angetriebenes Werkzeug ein/aus (`{S}` = Drehzahl).
+- **Mantel (TRACYL/G07.1)**: Zylinder-Interpolation zum Entgraten an/aus, Zylinder ein
+  (`TRACYL({ZD})` bzw. `G07.1 C{ZR}`), Ebene (Fanuc `G19 W0 H0`), Zylinder aus (`TRAFOOF` bzw.
+  `G07.1 C0.`), Umfangsachse (`Y` in mm bzw. `C` in Grad).
 
 Platzhalter: `{T}` `{T2}` Werkzeug, `{D}` `{D2}` Korrektur, `{S}` Drehzahl, `{W}` Winkel,
-`{NAME}` Programmname, `{NR}` Programmnummer, `{TEXT}` Kommentar. Ein `|` beginnt eine neue Zeile.
+`{NAME}` Programmname, `{NR}` Programmnummer, `{TEXT}` Kommentar, `{ZD}` `{ZR}` Durchmesser/Radius
+für die Zylinder-Interpolation. Ein `|` beginnt eine neue Zeile.
 
 So sieht derselbe Arbeitsgang mit der Fanuc-Vorlage aus:
 
@@ -620,8 +653,10 @@ Der Assistent erzeugt lieber keinen Code als einen gefährlichen. Er meldet z. B
 ### Grenzen
 
 Noch nicht enthalten: Heidenhain, Einstiche und Hinterschnitte (außen und innen), Gewinde,
-Bahnen mit TRANSMIT/TRACYL. Die Ecken einer Nut haben den Fräserradius; die Kanten an der
-Stirnseite einer offenen Nut werden nicht entgratet.
+TRANSMIT an der Stirnseite. Nuten selbst werden mit der Y-Achse gefräst (parallele Wände), nur das
+Entgraten auf dem Mantel läuft mit TRACYL/G07.1. Die Ecken einer Nut haben den Fräserradius; die Kanten
+an der Stirnseite einer offenen Nut werden nicht entgratet. Die Simulation zeigt den Fasenfräser beim
+Mantel-Entgraten vereinfacht (Achse parallel zur Winkellage statt radial gekippt).
 
 > **Wichtig:** Der erzeugte Code ist ein Vorschlag. Vor dem ersten Lauf an der Steuerung
 > simulieren bzw. mit reduziertem Eilgang und Vorschub einfahren, Werkzeugdaten und Spannung

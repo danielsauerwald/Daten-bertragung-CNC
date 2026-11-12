@@ -580,6 +580,8 @@ class KonturDialog(Dialog):
             ("Angetr. WZ", "{}  …  {}".format(one(pp.awz_ein, S=3000), one(pp.awz_aus))),
             ("C-Achse", "ein {}  ·  aus {}".format(one(pp.c_ein), one(pp.c_aus))),
             ("Klemmen", "{}  ·  lösen {}".format(one(pp.klemmen), one(pp.loesen))),
+            ("Mantel entgr.", "{} … {}".format(one(pp.zyl_ein, ZD=26, ZR=13), one(pp.zyl_aus))
+             if pp.zyl_entgraten else "X/Y/Z (ohne Zylinder-Interpolation)"),
             ("Wechselpunkt", "X{} Z{}".format(pp.num(pp.wechsel_x), pp.num(pp.wechsel_z))),
         ]
         self.pp_info.configure(text="\n".join("{:<15}{}".format(a + ":", b) for a, b in rows))

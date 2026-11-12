@@ -238,7 +238,7 @@ def anfrage(bilder: Sequence[Tuple[str, bytes]], aufgabe: str, schema: Dict[str,
 # M-/G-Code-Listen → Postprozessor
 # --------------------------------------------------------------------------
 
-BOOL_FELDER = ("dezimalpunkt", "eine_zeile")
+BOOL_FELDER = ("dezimalpunkt", "eine_zeile", "zyl_entgraten", "zyl_grad")
 ZAHL_FELDER = ("wechsel_x", "wechsel_z")
 # Platzhalter, ohne die ein Feld nicht funktioniert
 PFLICHT_PLATZHALTER = {"wz": ("{T",), "spindel_ein": ("{S}",), "awz_ein": ("{S}",), "c_pos": ("{W}",),
@@ -309,10 +309,11 @@ def _postpro_aufgabe(pp, steuerung: str) -> str:
         "aus den Bildern die Funktion eindeutig erfüllt. Gib in „begruendung“ den Code und seine Bedeutung "
         "aus dem Bild an. „sicher“ = false, wenn die Zuordnung eine Vermutung ist.\n"
         "3. Schreibweise der Felder: Platzhalter {{T}} {{T2}} Werkzeug, {{D}} {{D2}} Korrektur, {{S}} Drehzahl, "
-        "{{W}} Winkel, {{TEXT}} Kommentar, {{NAME}} Programmname, {{NR}} Programmnummer; „|“ trennt Zeilen. "
+        "{{W}} Winkel, {{TEXT}} Kommentar, {{NAME}} Programmname, {{NR}} Programmnummer, {{ZD}}/{{ZR}} "
+        "Zylinderdurchmesser/-radius für die Zylinder-Interpolation (TRACYL bzw. G07.1); „|“ trennt Zeilen. "
         "Beispiele: Siemens angetriebenes Werkzeug „S3={{S}} M3=3“, Fanuc „M13 S{{S}}“; Spindel "
         "positionieren „SPOS=DC({{W}})“ oder „G00 C{{W}}“; C-Achse ein z. B. „M34“. Felder "
-        "dezimalpunkt/eine_zeile als „ja“/„nein“, wechsel_x/wechsel_z als Zahl.\n"
+        "dezimalpunkt/eine_zeile/zyl_entgraten/zyl_grad als „ja“/„nein“, wechsel_x/wechsel_z als Zahl.\n"
         "4. Felder, zu denen die Bilder nichts sagen, lässt du weg. Werkzeugwechselpunkt nur, wenn er im Bild "
         "steht.\n"
         "5. In „hinweise“: Auffälligkeiten, z. B. mehrere mögliche Codes, unleserliche Stellen, Codes, die "

@@ -13,6 +13,7 @@ Platzhalter Bedeutung                                       Beispiel
 {TEXT}      Kommentartext                                   ;{TEXT}  oder ({TEXT})
 {NAME}      Programmname                                    %_N_{NAME}_MPF
 {NR}        Programmnummer (Ziffern aus dem Namen)          O{NR}
+{ZD} {ZR}   Durchmesser / Radius für Zylinder-Interpolation TRACYL({ZD}), G07.1 C{ZR}
 ==========  ==============================================  =====================
 
 Ein ``|`` in einer Vorlage beginnt eine neue Zeile (z. B. ``%|O{NR} ({NAME})``).
@@ -107,6 +108,13 @@ class Postprozessor:
     c_aus: str = ""
     awz_ein: str = "S3={S} M3=3"
     awz_aus: str = "M3=5"
+    # Zylinder-Interpolation (Mantelfläche: C-Achse interpoliert mit X/Z) – Kanten entgraten
+    zyl_entgraten: bool = True
+    zyl_ein: str = "TRACYL({ZD})"
+    zyl_ebene: str = ""
+    zyl_aus: str = "TRAFOOF"
+    zyl_achse: str = "Y"
+    zyl_grad: bool = False  # Umfangsachse in Grad (Fanuc C) statt mm auf der Abwicklung (Siemens Y)
 
     # -- Laden / Speichern ----------------------------------------------------
 
@@ -164,6 +172,9 @@ class Postprozessor:
         for key in ("TEXT", "NAME", "NR"):
             if key in values:
                 rep["{" + key + "}"] = str(values[key])
+        for key in ("ZD", "ZR"):
+            if key in values:
+                rep["{" + key + "}"] = self.num(values[key])
         out = []
         for part in str(template).split("|"):
             for k, v in rep.items():
@@ -218,6 +229,13 @@ class Postprozessor:
                                 ("ebene_axial", "Ebene axial")):
                 if not getattr(self, name).strip():
                     err.append("Postprozessor: „{}“ fehlt.".format(label))
+            if self.zyl_entgraten:
+                if not self.zyl_ein.strip() or not self.zyl_aus.strip():
+                    err.append("Postprozessor: Zylinder-Interpolation ist an, aber „Zylinder ein/aus“ fehlt "
+                               "(Siemens TRACYL({ZD}) / TRAFOOF, Fanuc G07.1 C{ZR} / G07.1 C0.).")
+                if not re.match(r"^[A-Z]$", self.zyl_achse.strip().upper()):
+                    err.append("Postprozessor: „Umfangsachse“ bei Zylinder-Interpolation muss ein Buchstabe "
+                               "sein (Siemens meist Y, Fanuc C).")
         if self.art == "fanuc" and not self.dezimalpunkt:
             warn.append("Postprozessor: Ohne Dezimalpunkt liest eine Fanuc X20 meist als 0,02 mm.")
         return err, warn
@@ -258,6 +276,13 @@ FELDER: List[Tuple[str, str, str, str]] = [
     ("c_aus", "C-Achse aus", "", "achsen"),
     ("awz_ein", "Angetr. Werkzeug ein", "{S} = Drehzahl", "achsen"),
     ("awz_aus", "Angetr. Werkzeug aus", "", "achsen"),
+    ("zyl_entgraten", "Kanten auf der Mantelfläche mit Zylinder-Interpolation entgraten (C-Achse interpoliert)",
+     "", "zylinder"),
+    ("zyl_ein", "Zylinder ein", "TRACYL({ZD}) · G07.1 C{ZR}", "zylinder"),
+    ("zyl_ebene", "Ebene Zylinder", "z. B. G19 W0 H0 (Fanuc), leer = keine", "zylinder"),
+    ("zyl_aus", "Zylinder aus", "TRAFOOF · G07.1 C0.", "zylinder"),
+    ("zyl_achse", "Umfangsachse", "Siemens Y (mm) · Fanuc C (Grad)", "zylinder"),
+    ("zyl_grad", "Umfangsachse in Grad (sonst mm auf der Abwicklung)", "", "zylinder"),
 ]
 
 VORLAGEN_NAMEN = {
@@ -278,7 +303,8 @@ def vorlage(key: str) -> Postprozessor:
             ende="M30|%", kreis="R", dezimalpunkt=True, eine_zeile=False,
             wz="T{T2}{D2}", vorschub_u="G99", ebene_drehen="G18", spindel_ein="G97 S{S} M3", spindel_aus="M5",
             kuehl_ein="M8", kuehl_aus="M9", vorschub_min="G98", ebene_radial="G19", ebene_axial="G17",
-            c_ein="", c_pos="G00 C{W}", klemmen="", loesen="", c_aus="", awz_ein="M13 S{S}", awz_aus="M15")
+            c_ein="", c_pos="G00 C{W}", klemmen="", loesen="", c_aus="", awz_ein="M13 S{S}", awz_aus="M15",
+            zyl_ein="G07.1 C{ZR}", zyl_ebene="G19 W0 H0", zyl_aus="G07.1 C0.", zyl_achse="C", zyl_grad=True)
     return Postprozessor()
 
 

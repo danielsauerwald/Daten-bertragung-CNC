@@ -384,6 +384,45 @@ class FraesSimulation:
 
     # -- Anzeige --------------------------------------------------------------------
 
+    def abtrag(self, z: float, zugabe: float = 0.05) -> List[List[Tuple[float, float]]]:
+        """Weggefräste Flächen im Querschnitt bei z (Stirnansicht, x nach rechts, y nach oben).
+
+        Je Winkellage und zusammenhängendem Bereich ein Polygon: unten die Treppe aus dem Höhenraster
+        (senkrechte Wände bleiben senkrecht), oben der Kreis des Teils (um ``zugabe`` größer, damit die
+        Zeichnung den Rand sicher überdeckt)."""
+        iz = int((z - self.z0) / self.g)
+        if not (0 <= iz < self.nz):
+            return []
+        r_top = self.rz[iz] + zugabe
+        g = self.g
+        out: List[List[Tuple[float, float]]] = []
+        for a, grid in self.h.items():
+            d, e = richtung(a)
+            row, orig = grid[iz], self.orig[a][iz]
+
+            def glob(xl: float, yl: float) -> Tuple[float, float]:
+                return xl * d[0] + yl * e[0], xl * d[1] + yl * e[1]
+
+            j = 0
+            while j < self.ny:
+                if not (row[j] < orig[j] - 1e-6):
+                    j += 1
+                    continue
+                start = j
+                while j < self.ny and row[j] < orig[j] - 1e-6:
+                    j += 1
+                unten: List[Tuple[float, float]] = []
+                for k in range(start, j):
+                    y0 = self.y0 + k * g
+                    unten.append(glob(row[k], y0))
+                    unten.append(glob(row[k], y0 + g))
+                oben: List[Tuple[float, float]] = []
+                for k in range(j, start - 1, -1):  # Kreisbogen an den Spaltengrenzen, rechts nach links
+                    yk = self.y0 + k * g
+                    oben.append(glob(math.sqrt(max(0.0, r_top * r_top - yk * yk)), yk))
+                out.append(unten + oben)
+        return out
+
     def schnitt(self, z: float, strahlen: int = 180) -> List[Tuple[float, float]]:
         """Querschnitt bei z in der Stirnansicht (x nach rechts, y nach oben)."""
         iz = int((z - self.z0) / self.g)

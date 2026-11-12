@@ -1582,6 +1582,161 @@ def _trochoid(m: _MillOut, rp: float, rb: float, rl: float, zc_min: float, zc_ma
     m.g("G00", x=x_app)
 
 
+# ---------------------------------------------------------------------------
+# Entgraten auf der Mantelfläche mit Zylinder-Interpolation (TRACYL / G07.1)
+# ---------------------------------------------------------------------------
+
+
+def _entgrat_kanten(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeug, res: Ergebnis):
+    """Kanten einer Fläche/Nut zum Entgraten: (Titel, Punkte (y, z, r), rp, X-Anfahrt, ausläufig, Fase)."""
+    label = "Fräsung {} ({})".format(nr, FEATURES.get(fr.art, fr.art))
+    z_front = 0.0
+    z_hi, z_lo = max(fr.z1, fr.z2), min(fr.z1, fr.z2)
+    if z_hi - z_lo < TOL:
+        res.errors.append("{}: Z rechts und Z links sind gleich.".format(label))
+        return None
+    if z_lo < z_front - TOL and z_hi > z_front + TOL:
+        z_hi = z_front
+    run_out = z_hi >= z_front - TOL
+    rp_all = contour_radius(teil, geom, z_lo, min(z_hi, z_front))
+    x_app = 2 * (rp_all + max(0.5, teil.sicherheit))
+    rp = contour_radius(teil, geom, z_lo + 0.01, min(z_hi, z_front) - 0.01)
+    c = fr.fase
+    if fr.art == "flaeche":
+        h = fr.mass / 2.0
+        if h <= TOL or h >= rp - TOL:
+            res.errors.append("{}: Schlüsselweite {} muss kleiner als der Durchmesser Ø{} sein.".format(
+                label, fmt(fr.mass), fmt(2 * rp)))
+            return None
+        pts = _flaeche_umriss(fr, rp, z_front, run_out)
+        title = "ENTGRATEN FLAECHE SW{}".format(fmt(fr.mass))
+    else:
+        b, t = fr.mass, fr.tiefe
+        if t <= TOL or t >= rp or b <= TOL or b >= 2 * rp - TOL:
+            res.errors.append("{}: Breite/Tiefe passen nicht zu Ø{}.".format(label, fmt(2 * rp)))
+            return None
+        nut_tool = teil.tool(fr.wz)
+        corner_r = nut_tool.dm / 2.0 if nut_tool is not None and nut_tool.dm > 0 else 0.0
+        pts = _nut_umriss(fr, rp, corner_r, z_front, run_out)
+        title = "ENTGRATEN NUT {}X{}".format(fmt(b), fmt(t))
+    if not _cone_clear(teil, geom, [(z, r - c) for _, z, r in pts], w.dm / 2.0, rp):
+        res.errors.append(_cone_msg(label, w))
+        return None
+    return title, pts, rp, x_app, run_out, c
+
+
+def _norm_winkel(a: float) -> float:
+    a = a % 360.0
+    return 0.0 if abs(a - 360.0) < 1e-6 else a
+
+
+def _zyl_entgraten(teil: Teil, geom: Geometrie, nr: int, fr: Fraesung, w: Werkzeug, res: Ergebnis,
+                   out: _Out) -> None:
+    """Kanten auf der Mantelfläche: C-Achse interpoliert mit X/Z (Siemens TRACYL, Fanuc G07.1).
+
+    Alle Kanten einer Nut (und die Längskanten und Bögen einer Fläche) liegen auf dem Zylinder rp. Mit
+    Zylinder-Interpolation steht der Fasenfräser immer radial und gleich tief (Spitze bei rp − Fase);
+    die Steuerung dreht die Spindel mit. Je Winkellage: C und Z außerhalb positionieren, Zylinder ein,
+    eintauchen, Kontur in (Umfang, Z), Zylinder aus, frei fahren. Bei einer zur Stirn auslaufenden Fläche
+    ist die Kante an der Stirnseite gerade – die folgt danach wie bisher mit der Y-Achse.
+    """
+    pp = out.pp
+    k = _entgrat_kanten(teil, geom, nr, fr, w, res)
+    if k is None:
+        return
+    title, pts, rp, x_app, run_out, c = k
+    stirn: List[Tuple[float, float, float]] = []
+    mantel = pts
+    if fr.art == "flaeche" and run_out:
+        mantel, stirn = pts[:-1], pts[-2:]
+    achse = (pp.zyl_achse.strip().upper() or "Y")[0]
+    phis = [math.asin(max(-1.0, min(1.0, y / rp))) for y, _z, _r in mantel]
+    # Eintauchtiefe je Punkt: Die Wände (Nut) bzw. die Fläche stehen nicht radial, sondern parallel zur
+    # Y-Achse. Der radial stehende 90°-Kegel ist dort um beta zur Wand gekippt; damit die Fase an der Wand
+    # trotzdem c lang wird, taucht er um c·(cos beta + sin beta) ein (beta = 0 an Wänden quer zur Achse).
+    tiefen: List[float] = []
+    for i, phi in enumerate(phis):
+        ya, za, _ra = mantel[max(0, i - 1)]
+        yb, zb, _rb = mantel[min(len(mantel) - 1, i + 1)]
+        ln = math.hypot(yb - ya, zb - za)
+        n_y = abs(zb - za) / ln if ln > EPS else 0.0  # Y-Anteil der Wand-Normalen (Tangente in y/z)
+        beta = math.asin(min(1.0, abs(math.sin(phi)) * n_y))
+        tiefen.append(c * (math.cos(beta) + math.sin(beta)))
+    if not _cone_clear(teil, geom, [(z, rp - d) for (_y, z, _r), d in zip(mantel, tiefen)], w.dm / 2.0, rp):
+        res.errors.append(_cone_msg("Fräsung {} ({})".format(nr, FEATURES.get(fr.art, fr.art)), w))
+        return
+
+    def lokal(r: float, phi: float, z: Optional[float] = None, kind: str = "G1") -> FMove:
+        """Werkzeug radial unter phi (zur Mittellage der Winkellage) im Rahmen der Winkellage."""
+        return FMove(kind, 2 * r * math.cos(phi), r * math.sin(phi), z)
+
+    add = out.lines.extend
+    out.raw("")
+    out.raw(pp.comment("{} {}".format(title, w.name)))
+    add(pp.tool_lines(w.t, w.d, pp.vorschub_min, pp.ebene_radial))
+    add(pp.fill(pp.spindel_aus))
+    add(pp.fill(pp.c_ein))
+    starts: List[int] = []
+    moves: List[FMove] = []
+    for i, a in enumerate(fr.winkel):
+        c0 = _norm_winkel(a - math.degrees(phis[0]))
+        lines: List[str] = []
+        mv: List[FMove] = []
+
+        def zeile(text: str, move: Optional[FMove] = None) -> None:
+            lines.append(text)
+            mv.append(move or FMove("G0"))  # Zeile ohne Bewegung im Teil (Spindel, Umschalten)
+
+        for ln in pp.fill(pp.c_pos, W=c0):
+            zeile(ln, lokal(x_app / 2.0 if i else pp.wechsel_x / 2.0, phis[0], kind="G0"))
+        if i == 0:
+            for ln in pp.fill(pp.awz_ein, S=w.s):
+                zeile(ln)
+        z0 = mantel[0][1]
+        zeile("G00 Z" + pp.num(z0), FMove("G0", z=z0))
+        zeile("G00 X" + pp.num(x_app), lokal(x_app / 2.0, phis[0], kind="G0"))
+        for ln in pp.fill(pp.zyl_ebene) + pp.fill(pp.zyl_ein, ZD=2 * rp, ZR=rp):
+            zeile(ln)
+        zeile("G01 X{} F{}".format(pp.num(2 * (rp - tiefen[0])), pp.num(w.f)), lokal(rp - tiefen[0], phis[0]))
+        x_alt = 2 * (rp - tiefen[0])
+        for (y, z, _r), phi, d in zip(mantel[1:], phis[1:], tiefen[1:]):
+            cw = c0 + math.degrees(phis[0] - phi)  # stetig weiterzählen, nicht auf 0…360 kürzen
+            u = cw if pp.zyl_grad else rp * math.radians(cw)
+            x = 2 * (rp - d)
+            wort_x = "X{} ".format(pp.num(x)) if abs(x - x_alt) > 0.0005 else ""
+            x_alt = x
+            zeile("G01 {}{}{} Z{}".format(wort_x, achse, pp.num(u), pp.num(z)), lokal(rp - d, phi, z))
+        for ln in pp.fill(pp.zyl_aus):
+            zeile(ln)
+        zeile("G00 X" + pp.num(x_app), lokal(x_app / 2.0, phis[-1], kind="G0"))
+        starts.append(len(out.lines))
+        add(lines)
+        if i == 0:
+            moves = mv
+    winkel = "/".join(fmt(a) for a in fr.winkel)
+    res.fraes_ops.append(FraesOp(nr, w.t, "radial", list(fr.winkel), moves, starts, True,
+                                 title + " (C-ACHSE)"))
+    if stirn:  # gerade Kante an der Stirnseite: Spindel steht, Y-Achse
+        m = _MillOut(pp)
+        _edge_path(m, stirn, c, x_app, w.f)
+        starts2: List[int] = []
+        for a in fr.winkel:
+            add(pp.fill(pp.c_pos, W=a))
+            add(pp.fill(pp.klemmen))
+            starts2.append(len(out.lines))
+            add(m.lines)
+            add(pp.fill(pp.loesen))
+        res.fraes_ops.append(FraesOp(nr, w.t, "radial", list(fr.winkel), list(m.moves), starts2, True, title))
+    out.raw("G00 Y" + pp.num(0))
+    add(pp.fill(pp.awz_aus))
+    add(pp.fill(pp.kuehl_aus))
+    add(pp.fill(pp.c_aus))
+    add(["G00 X" + pp.num(pp.wechsel_x), "G00 Z" + pp.num(pp.wechsel_z)])
+    add(pp.fill(pp.ebene_drehen))
+    res.arbeitsgaenge.append("{} entgraten (C-Achse interpoliert) · T{} · C {}°".format(
+        FEATURES.get(fr.art, fr.art), w.t, winkel))
+
+
 def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
     pp = out.pp
     ops: List[Tuple[int, Fraesung, bool]] = []
@@ -1603,6 +1758,9 @@ def _milling(teil: Teil, geom: Geometrie, res: Ergebnis, out: _Out) -> None:
             arten = ("bohrer", "fraeser") if fr.art.startswith("bohrung") else ("fraeser",)
             w = _check_tool(res, nr, fr, teil, fr.wz, arten, "Werkzeug")
         if w is None:
+            continue
+        if deburr and fr.art in ("flaeche", "nut") and pp.zyl_entgraten and pp.zyl_ein.strip():
+            _zyl_entgraten(teil, geom, nr, fr, w, res, out)
             continue
         if w.ap <= TOL and not deburr and fr.art in ("flaeche", "nut"):
             res.errors.append("Fräsung {}: Zustellung (Tiefe je Schnitt) von T{} fehlt.".format(nr, w.t))

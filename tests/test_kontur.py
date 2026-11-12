@@ -433,7 +433,9 @@ def test_slot_wide_three_positions_and_deburr():
     res = k.generate(t)
     assert not res.ok and "käme an einen größeren Durchmesser" in res.errors[0]
     t.fraesungen[0].z2 = -25
-    res = k.generate(t)
+    xyz = vorlage("sin_s3")
+    xyz.zyl_entgraten = False  # Entgraten ohne Zylinder-Interpolation: X/Y/Z
+    res = k.generate(t, pp=xyz)
     assert res.ok, res.errors
     b = _block(res.code, "FRAESEN NUT 10X2")
     assert [b.count("SPOS=DC({})".format(a)) for a in (0, 120, 240)] == [1, 1, 1]
@@ -744,3 +746,94 @@ def test_old_files_get_inner_tools_where_free():
     # neue Dateien bleiben unverändert
     t2 = k.Teil.from_dict(json.loads(json.dumps(t.to_dict())))
     assert [w.t for w in t2.werkzeuge] == [w.t for w in t.werkzeuge]
+
+
+# ---------------------------------------------------------------------------
+# Entgraten auf der Mantelfläche mit Zylinder-Interpolation (TRACYL / G07.1)
+# ---------------------------------------------------------------------------
+
+
+def _nut_teil():
+    t = k.beispiel_teil()
+    t.tool(5).dm = 5
+    t.fraesungen = [Fraesung("nut", [0, 180], -17, -25, 6, 3, 0, 5, True, 7, 0.3)]
+    return t
+
+
+def test_slot_deburr_with_tracyl_siemens():
+    res = k.generate(_nut_teil())
+    assert res.ok, res.errors
+    d = _block(res.code, "ENTGRATEN NUT 6X3")
+    lines = d.split("\n")
+    # C (Spindel) außerhalb positionieren, dann Zylinder ein – keine Klemmung, keine G00 im Zylinderbetrieb
+    i = lines.index("TRACYL(26)")
+    assert lines[i - 3:i] == ["G00 Z-19.5", "G00 X30"] or lines[i - 2:i] == ["G00 Z-19.5", "G00 X30"]
+    assert "SPOS=DC(13.342)" in lines and "SPOS=DC(193.342)" in lines
+    j = lines.index("TRAFOOF")
+    inside = lines[i + 1:j]
+    assert all(ln.startswith("G01") for ln in inside)
+    assert lines[j + 1] == "G00 X30"  # erst Zylinder aus, dann frei fahren
+    # Kontur auf der Abwicklung: Y = Umfang in mm (r13 · Winkel), Z wie in der Zeichnung
+    ys = _vals("\n".join(inside), "Y")
+    assert max(ys) == pytest.approx(13 * math.radians(13.342), abs=0.002)
+    assert min(ys) == pytest.approx(-13 * math.radians(13.342), abs=0.002)
+    zs = _vals("\n".join(inside), "Z")
+    assert min(zs) == pytest.approx(-25) and max(zs) == pytest.approx(-17)
+    # Tiefe: an den Längswänden um c·(cos β + sin β) tiefer (Wand steht nicht radial), am Ende genau c
+    xs = _vals("\n".join(inside), "X")
+    beta = math.radians(13.342)
+    assert min(xs) == pytest.approx(2 * (13 - 0.3 * (math.cos(beta) + math.sin(beta))), abs=0.002)
+    assert max(xs) == pytest.approx(2 * (13 - 0.3), abs=0.002)
+    assert "Y0.5 Z-25" in d and "\nG01 Y-0.5 Z-25" in d  # gerades Stück am Nutende (Fräser Ø5, Nut 6)
+    assert "(C-Achse interpoliert)" in res.arbeitsgaenge[-1]
+
+
+def test_slot_deburr_with_g071_fanuc():
+    pp = vorlage("fanuc")
+    pp.c_ein, pp.c_aus = "M35", "M34"
+    res = k.generate(_nut_teil(), pp=pp)
+    assert res.ok, res.errors
+    d = _block(res.code, "ENTGRATEN NUT 6X3")
+    lines = d.split("\n")
+    i = lines.index("G07.1 C13.")
+    assert lines[i - 1] == "G19 W0 H0" and "G00 C13.342" in lines and "M35" in lines
+    j = lines.index("G07.1 C0.")
+    inside = "\n".join(lines[i + 1:j])
+    cs = _vals(inside, "C")  # Umfangsachse in Grad
+    assert max(cs) == pytest.approx(13.342, abs=0.002) and min(cs) == pytest.approx(-13.342, abs=0.002)
+    assert "G00" not in inside and lines[j + 1] == "G00 X30."
+    for ln in res.code.split("\n"):  # Dezimalpunkt auch hier
+        if not ln.startswith("("):
+            assert not re.search(r"(?<![A-Z])[XYZCFR]-?\d+(?![\d.])", ln), ln
+
+
+def test_flat_deburr_with_tracyl_and_front_edge_with_y():
+    res = k.generate(k.beispiel_teil())
+    assert res.ok, res.errors
+    d = _block(res.code, "ENTGRATEN FLAECHE SW17")
+    assert d.count("TRACYL(20)") == 2 and d.count("TRAFOOF") == 2
+    # Kante an der Stirnseite (Z0) ist gerade: danach mit stehender Spindel und Y-Achse
+    tail = d[d.rindex("TRAFOOF"):]
+    assert "SPOS=DC(0)" in tail and "SPOS=DC(180)" in tail
+    assert "G01 X16.4 Y-5.268 Z0" in tail
+    # Bogen am Flächenende liegt auf dem Mantel: Z bleibt, nur der Umfang ändert sich
+    seg = d[d.index("TRACYL(20)"):d.index("TRAFOOF")]
+    assert "Y0 Z-10" in seg
+
+
+def test_cylinder_interpolation_settings():
+    pp = vorlage("sin_s4")
+    assert (pp.zyl_entgraten, pp.zyl_ein, pp.zyl_aus, pp.zyl_achse, pp.zyl_grad) == (
+        True, "TRACYL({ZD})", "TRAFOOF", "Y", False)
+    assert pp.fill(pp.zyl_ein, ZD=26) == ["TRACYL(26)"]
+    f = vorlage("fanuc")
+    assert f.fill(f.zyl_ein, ZR=13) == ["G07.1 C13."]
+    pp.zyl_ein = ""
+    assert any("Zylinder" in e for e in pp.pruefen()[0])
+    pp.zyl_entgraten = False
+    assert not pp.pruefen()[0]
+    pp.zyl_entgraten, pp.zyl_ein, pp.zyl_achse = True, "TRACYL({ZD})", "CY"
+    assert any("Umfangsachse" in e for e in pp.pruefen()[0])
+    # ältere gespeicherte Postprozessoren bekommen die Vorgaben der Vorlage
+    old = {k_: v for k_, v in vorlage("sin_s3").to_dict().items() if not k_.startswith("zyl_")}
+    assert k.Postprozessor.from_dict(old).zyl_ein == "TRACYL({ZD})"

@@ -142,3 +142,42 @@ def test_face_holes_are_tracked_and_lines_map():
     sim.gehe_zu(5)
     op, w, winkel, pos = sim.position
     assert op.lage == "axial" and w.r == 2.5 and winkel == 0
+
+
+def test_section_keeps_slot_walls_vertical():
+    """Querschnitt einer Nut: senkrechte Wände (Raster 0,2 mm), nicht schräg wie bei Strahlen vom Mittelpunkt."""
+    t = k.beispiel_teil()
+    t.tool(5).dm = 5
+    t.fraesungen = [k.Fraesung("nut", [0.0], -17, -25, 6, 3, 0, 5)]
+    sim = FraesSimulation(t, k.generate(t, rahmen=True))
+    sim.bis_ende()
+    polys = sim.abtrag(-21.0)
+    assert len(polys) == 1
+    pts = polys[0]
+    # C0: Nut oben (y), quer x. Unten Boden bei r10, Wände bei x = ±3 (auf das Raster 0,2 genau)
+    boden = [p for p in pts if abs(p[1] - 10.0) < 1e-6]
+    assert boden and min(x for x, _ in boden) == pytest.approx(-3.0, abs=0.21)
+    assert max(x for x, _ in boden) == pytest.approx(3.0, abs=0.21)
+    oben = [p for p in pts if p[1] > 12.5]
+    assert oben and min(x for x, _ in oben) == pytest.approx(-3.0, abs=0.21)
+    assert max(x for x, _ in oben) == pytest.approx(3.0, abs=0.21)
+    assert sim.abtrag(-10.0) == []  # dort ist nichts gefräst
+
+
+def test_tracyl_deburr_simulates_with_chamfer_on_walls():
+    t = k.beispiel_teil()
+    t.tool(5).dm = 5
+    t.fraesungen = [k.Fraesung("nut", [0.0], -17, -25, 6, 3, 0, 5, True, 7, 0.3)]
+    res = k.generate(t, rahmen=True)
+    assert res.ok, res.errors
+    op = [o for o in res.fraes_ops if o.entgraten][0]
+    assert op.titel.endswith("(C-ACHSE)") and len(op.moves) == len(
+        [ln for ln in res.code.split("\n")[op.zeilen[0]:op.zeilen[0] + len(op.moves)]])
+    sim = FraesSimulation(t, res)
+    sim.bis_ende()
+    assert not [e for e in sim.ereignisse if e.schwer], [e.text for e in sim.ereignisse]
+    iz = int((-21.0 - sim.z0) / sim.g)
+    row, orig = sim.h[0.0][iz], sim.orig[0.0][iz]
+    fase = {round(sim.yc[j], 1): orig[j] - row[j] for j in range(sim.ny) if 3.0 < abs(sim.yc[j]) < 3.6}
+    assert fase[3.1] > 0.1 and fase[-3.1] > 0.1  # Kante gebrochen
+    assert fase[3.5] < 0.01  # aber keine große Fase

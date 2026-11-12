@@ -13,7 +13,8 @@ from .postpro import ARTEN, FELDER, VORLAGEN_NAMEN, Postprozessor, fmt, vorlage
 from .system import IS_WIN, toggle_touch_keyboard
 from .theme import C, MONO_FAMILY, Fonts, px
 
-TABS = (("format", "Format"), ("drehen", "Drehen"), ("achsen", "C-/Y-Achse, angetr. WZ"))
+TABS = (("format", "Format"), ("drehen", "Drehen"), ("achsen", "C-/Y-Achse, angetr. WZ"),
+        ("zylinder", "Mantel (TRACYL/G07.1)"))
 
 
 def vorschau(pp: Postprozessor) -> str:
@@ -124,6 +125,15 @@ class PostproDialog(Dialog):
             if hint:
                 tk.Label(f, text=hint, bg=C["surface"], fg=C["muted"], font=fonts.small, anchor="w").grid(
                     row=r, column=2, sticky="w", padx=(px(self, 10), 0))
+        tk.Label(self.tabs["zylinder"], text=(
+            "Kanten auf der Mantelfläche (Nuten, Bögen an Flächen) werden mit Zylinder-Interpolation "
+            "entgratet: die Spindel (C-Achse) dreht mit, der Fasenfräser steht immer radial und gleich tief. "
+            "Siemens: TRACYL({ZD}) … TRAFOOF, Umfangsachse Y in mm auf der Abwicklung. Fanuc: G19 W0 H0, "
+            "G07.1 C{ZR} … G07.1 C0., Umfangsachse C in Grad. Ohne diese Option an der Maschine: Haken weg – "
+            "dann wird wie bisher mit X/Y/Z entgratet."), bg=C["surface"], fg=C["muted"], font=fonts.small,
+            justify="left", anchor="w", wraplength=px(self, 620)).grid(row=rows["zylinder"], column=0,
+                                                                        columnspan=3, sticky="w",
+                                                                        pady=(px(self, 12), 0))
         if IS_WIN:
             ttk.Button(self.tabs["format"], text="⌨ Tastatur", style="Small.TButton",
                        command=toggle_touch_keyboard).grid(row=rows["format"], column=0, sticky="w",
