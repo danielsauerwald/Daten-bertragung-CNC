@@ -339,6 +339,8 @@ def lade_glb(data: bytes) -> Modell:
 
 
 def _flaeche_mm(f: Dict[str, Any], tf, tf_dir) -> Optional[Dict[str, Any]]:
+    if not isinstance(f, dict):  # Freiform (B-Spline: Gewinde, Spiralnut) – keine genaue Form
+        return None
     typ = f.get("type")
     try:
         if typ == "plane":
